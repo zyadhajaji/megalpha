@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MEGALPHA — Design Preview</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: #0a0a0a;
+    color: #c8c8c8;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── TOP BAR ── */
+  .topbar {
+    height: 38px;
+    background: #0f0f0f;
+    border-bottom: 1px solid #1e1e1e;
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    gap: 24px;
+    flex-shrink: 0;
+  }
+  .logo {
+    color: #c8c8c8;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.15em;
+  }
+  .logo span { color: #4a7aaa; }
+  .price-group { display: flex; align-items: center; gap: 6px; }
+  .price-label { color: #444; font-size: 10px; }
+  .price-val { color: #c8c8c8; font-size: 11px; }
+  .price-chg.up { color: #4a9e6e; }
+  .price-chg.dn { color: #a85555; }
+  .topbar-right { margin-left: auto; display: flex; align-items: center; gap: 16px; }
+  .status-dot { width: 6px; height: 6px; border-radius: 50%; background: #4a9e6e; display: inline-block; margin-right: 5px; }
+  .status-text { color: #4a9e6e; font-size: 10px; }
+
+  /* ── MAIN LAYOUT ── */
+  .body {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+  }
+
+  /* ── SIDEBAR ── */
+  .sidebar {
+    width: 52px;
+    background: #0f0f0f;
+    border-right: 1px solid #1a1a1a;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 12px 0;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+  .nav-item {
+    width: 36px;
+    height: 36px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    color: #3a3a3a;
+    font-size: 15px;
+    transition: all 0.15s;
+  }
+  .nav-item:hover { background: #1a1a1a; color: #666; }
+  .nav-item.active { background: #162030; color: #4a7aaa; }
+  .nav-spacer { flex: 1; }
+
+  /* ── CONTENT ── */
+  .content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    padding: 12px;
+    gap: 10px;
+  }
+
+  /* ── STAT ROW ── */
+  .stat-row {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+    flex-shrink: 0;
+  }
+  .stat-card {
+    background: #111;
+    border: 1px solid #1c1c1c;
+    border-radius: 4px;
+    padding: 10px 14px;
+  }
+  .stat-label {
+    color: #3a3a3a;
+    font-size: 9px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    margin-bottom: 6px;
+  }
+  .stat-value {
+    color: #d4d4d4;
+    font-size: 18px;
+    font-weight: 500;
+    letter-spacing: -0.02em;
+    line-height: 1;
+    margin-bottom: 4px;
+  }
+  .stat-sub { font-size: 10px; color: #444; }
+  .stat-sub.up { color: #4a9e6e; }
+  .stat-sub.dn { color: #a85555; }
+  .stat-sub.amber { color: #9c8040; }
+
+  /* ── MAIN ROW ── */
+  .main-row {
+    display: grid;
+    grid-template-columns: 1fr 340px;
+    gap: 8px;
+    flex: 1;
+    min-height: 0;
+  }
+
+  /* ── CHART PANEL ── */
+  .chart-panel {
+    background: #111;
+    border: 1px solid #1c1c1c;
+    border-radius: 4px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .panel-header {
+    padding: 8px 14px;
+    border-bottom: 1px solid #1a1a1a;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-shrink: 0;
+  }
+  .panel-title { color: #666; font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; }
+  .tf-btn {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 9px;
+    background: none;
+    border: none;
+    color: #3a3a3a;
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 2px;
+  }
+  .tf-btn.active { background: #1a2535; color: #4a7aaa; }
+  .tf-btn:hover { color: #666; }
+  .panel-spacer { flex: 1; }
+  .coin-sel { color: #c8c8c8; font-size: 10px; font-family: 'IBM Plex Mono', monospace; background: none; border: none; cursor: pointer; }
+
+  .chart-body {
+    flex: 1;
+    padding: 10px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  /* fake candle chart */
+  .candle-chart {
+    width: 100%;
+    height: 100%;
+  }
+
+  /* ── RIGHT COLUMN ── */
+  .right-col {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-height: 0;
+  }
+
+  /* ── AGENT PANEL ── */
+  .agent-panel {
+    background: #111;
+    border: 1px solid #1c1c1c;
+    border-radius: 4px;
+    padding: 12px 14px;
+    flex-shrink: 0;
+  }
+  .agent-header { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .agent-indicator {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: #9c8040;
+    box-shadow: 0 0 6px rgba(156,128,64,0.4);
+  }
+  .agent-state { color: #9c8040; font-size: 10px; letter-spacing: 0.1em; }
+  .agent-label { color: #3a3a3a; font-size: 9px; margin-left: auto; }
+  .agent-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .agent-stat { }
+  .agent-stat-label { color: #333; font-size: 9px; margin-bottom: 2px; }
+  .agent-stat-val { color: #888; font-size: 11px; }
+
+  /* ── TRADES PANEL ── */
+  .trades-panel {
+    background: #111;
+    border: 1px solid #1c1c1c;
+    border-radius: 4px;
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .trade-row {
+    display: flex;
+    align-items: center;
+    padding: 7px 14px;
+    border-bottom: 1px solid #141414;
+    gap: 8px;
+  }
+  .trade-row:last-child { border-bottom: none; }
+  .trade-coin { color: #888; font-size: 10px; width: 32px; }
+  .trade-dir { font-size: 9px; padding: 1px 5px; border-radius: 2px; }
+  .trade-dir.long { background: #0d1f16; color: #4a9e6e; }
+  .trade-dir.short { background: #1f0d0d; color: #a85555; }
+  .trade-reason { color: #333; font-size: 9px; flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .trade-pnl { font-size: 10px; text-align: right; }
+  .trade-pnl.up { color: #4a9e6e; }
+  .trade-pnl.dn { color: #a85555; }
+  .trade-time { color: #2a2a2a; font-size: 9px; width: 40px; text-align: right; }
+
+  /* ── BOTTOM STRIP ── */
+  .bottom-strip {
+    height: 26px;
+    background: #0d0d0d;
+    border-top: 1px solid #181818;
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    gap: 20px;
+    flex-shrink: 0;
+  }
+  .strip-item { color: #2e2e2e; font-size: 9px; letter-spacing: 0.08em; }
+  .strip-item span { color: #444; }
+
+  /* ── FEEDBACK ── */
+  .feedback-bar {
+    position: fixed;
+    bottom: 32px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: #1a1a1a;
+    border: 1px solid #2a2a2a;
+    border-radius: 6px;
+    padding: 10px 20px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    color: #888;
+    z-index: 100;
+  }
+  .feedback-bar strong { color: #c8c8c8; }
+</style>
+</head>
+<body>
+
+<!-- TOP BAR -->
+<div class="topbar">
+  <div class="logo">MEG<span>ALPHA</span></div>
+
+  <div class="price-group">
+    <span class="price-label">BTC</span>
+    <span class="price-val">107,420</span>
+    <span class="price-chg up">+1.2%</span>
+  </div>
+  <div class="price-group">
+    <span class="price-label">ETH</span>
+    <span class="price-val">2,491</span>
+    <span class="price-chg dn">-0.3%</span>
+  </div>
+  <div class="price-group">
+    <span class="price-label">SOL</span>
+    <span class="price-val">171.40</span>
+    <span class="price-chg up">+0.8%</span>
+  </div>
+
+  <div class="topbar-right">
+    <span class="status-dot"></span><span class="status-text">Live</span>
+    <span style="color:#2a2a2a">14:22:07 UTC</span>
+  </div>
+</div>
+
+<!-- BODY -->
+<div class="body">
+
+  <!-- SIDEBAR -->
+  <div class="sidebar">
+    <div class="nav-item active" title="Overview">⊞</div>
+    <div class="nav-item" title="Charts">◫</div>
+    <div class="nav-item" title="Backtest">◷</div>
+    <div class="nav-item" title="RL Agent">◈</div>
+    <div class="nav-item" title="Data Hub">◉</div>
+    <div class="nav-spacer"></div>
+    <div class="nav-item" title="Journal">✦</div>
+  </div>
+
+  <!-- CONTENT -->
+  <div class="content">
+
+    <!-- STAT ROW -->
+    <div class="stat-row">
+      <div class="stat-card">
+        <div class="stat-label">Equity</div>
+        <div class="stat-value">$10,312</div>
+        <div class="stat-sub up">+$312 open P&L</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">RL Agent</div>
+        <div class="stat-value" style="font-size:13px;color:#9c8040;margin-top:3px;">Scanning</div>
+        <div class="stat-sub amber">68% confidence · NY session</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Open Position</div>
+        <div class="stat-value" style="font-size:13px;color:#4a9e6e;margin-top:3px;">BTC Long 2×</div>
+        <div class="stat-sub up">entry $106,100 · +$312</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Backtest · BTC 1H</div>
+        <div class="stat-value" style="font-size:13px;color:#4a9e6e;margin-top:3px;">68% win rate</div>
+        <div class="stat-sub">PF 2.1 · 90 days · 142 trades</div>
+      </div>
+    </div>
+
+    <!-- MAIN ROW -->
+    <div class="main-row">
+
+      <!-- CHART PANEL -->
+      <div class="chart-panel">
+        <div class="panel-header">
+          <select class="coin-sel">
+            <option>BTC</option>
+            <option>ETH</option>
+            <option>SOL</option>
+          </select>
+          <span class="panel-title" style="margin-left:4px">·</span>
+          <button class="tf-btn">1m</button>
+          <button class="tf-btn">15m</button>
+          <button class="tf-btn active">1H</button>
+          <button class="tf-btn">4H</button>
+          <button class="tf-btn">1D</button>
+          <div class="panel-spacer"></div>
+          <span style="color:#3a3a3a;font-size:9px;">500 candles</span>
+        </div>
+        <div class="chart-body">
+          <svg class="candle-chart" viewBox="0 0 600 220" preserveAspectRatio="none">
+            <!-- grid lines -->
+            <line x1="0" y1="55" x2="600" y2="55" stroke="#161616" stroke-width="1"/>
+            <line x1="0" y1="110" x2="600" y2="110" stroke="#161616" stroke-width="1"/>
+            <line x1="0" y1="165" x2="600" y2="165" stroke="#161616" stroke-width="1"/>
+
+            <!-- candles — green -->
+            <line x1="18" y1="80" x2="18" y2="150" stroke="#2d5e44" stroke-width="1"/>
+            <rect x="13" y="90" width="10" height="45" fill="#4a9e6e" rx="0.5"/>
+
+            <line x1="38" y1="70" x2="38" y2="135" stroke="#2d5e44" stroke-width="1"/>
+            <rect x="33" y="82" width="10" height="42" fill="#4a9e6e" rx="0.5"/>
+
+            <line x1="58" y1="85" x2="58" y2="148" stroke="#6e3a3a" stroke-width="1"/>
+            <rect x="53" y="97" width="10" height="38" fill="#a85555" rx="0.5"/>
+
+            <line x1="78" y1="75" x2="78" y2="140" stroke="#2d5e44" stroke-width="1"/>
+            <rect x="73" y="85" width="10" height="40" fill="#4a9e6e" rx="0.5"/>
+
+            <line x1="98" y1="68" x2="98" y2="120" stroke="#2d5e44" stroke-width="1"/>
+            <rect x="93" y="76" width="10" height="35" fill="#4a9e6e" rx="0.5"/>
+
+            <line x1="118" y1="72" x2="118" y2="135" stroke="#6e3a3a" stroke-width="1"/>
+            <rect x="113" y="82" width="10" height="40" fill="#a85555" rx="0.5"/>
+
+            <line x1="138" y1="60" x2="138" y2="118" stroke="#2d5e44" stroke-width="1"/>
+            <rect x="133" y="70" width="10" height="34" fill="#4a9e6e" rx="0.5"/>
+
+            <line x1="158" y1="55" x2="158" y2="108" stroke="#2d5e44" stroke-width="1"/>
+            <rect x="153" y="63" width="10" height="32" fill="#4a9e6e" rx="0.5"/>
+
+            <line x1="178" y1="62" x2="178" y2="115" stroke="#6e3a3a" stroke-width="1"/>
+            <rect x="173" y="72" width="10" height="30" fill="#a85555" rx="0.5"/>
+
+            <line x1="198" y1="50" x2="198" y2="100" stroke="#2d5e44" stroke-width="1"/>
+            <rect x="193" y="57" width="10" height="30" fill="#4a9e6e" rx="0.5"/>
+
+            <line x1="218" y1="45" x2="218" y2="95" stroke="#2d5e44" stroke-width="1"/>
+            <rect x="213" y="52" width="10" height="28" fill="#4a9e6e" rx="0.5"/>
+
+            <line x1="238" y1="48" x2="238" y2="102" stroke="#6e3a3a" stroke-width="1"/>
+            <rect x="233" y="58" width="10" height="30" fill="#a85555" rx="0.5"/>
+
+            <line x1="258" y1="40" x2="258" y2="90" stroke="#2d5e44" stroke-width="1"/>
+            <rect x="253" y="48" width="10" height="28" fill="#4a9e6e" rx="0.5"/>
+
+            <line x1="278" y1="35" x2="278" y2="82" stroke="#2d5e44" stroke-width="1"/>
+            <rect x="273" y="42" width="10" height="26" fill="#4a9e6e" rx="0.5"/>
+
+            <line x1="298" y1="38" x2="298" y2="88" stroke="#6e3a3a" stroke-width="1"/>
+            <rect x="293" y="50" width="10" height="28" fill="#a85555" rx="0.5"/>
+
+            <line x1="318" y1="30" x2="318" y2="76" stroke="#2d5e44" stroke-width="1"/>
+            <rect x="313" y="38" width="10" height="24" fill="#4a9e6e" rx="0.5"/>
+
+            <line x1="338" y1="25" x2="338" y2="70" stroke="#2d5e44" stroke-width="1"/>
+            <rect x="333" y="32" width="10" height="24" fill="#4a9e6e" rx="0.5"/>
+
+            <line x1="358" y1="28" x2="358" y2="75" stroke="#6e3a3a" stroke-width="1"/>
+            <rect x="353" y="40" width="10" height="24" fill="#a85555" rx="0.5"/>
+
+            <line x1="378" y1="22" x2="378" y2="65" stroke="#2d5e44" stroke-width="1"/>
+            <rect x="373" y="30" width="10" height="22" fill="#4a9e6e" rx="0.5"/>
+
+            <!-- current candle — brighter -->
+            <line x1="398" y1="18" x2="398" y2="58" stroke="#4a9e6e" stroke-width="1"/>
+            <rect x="393" y="25" width="10" height="22" fill="#5ab87e" rx="0.5"/>
+
+            <!-- entry marker -->
+            <line x1="0" y1="132" x2="600" y2="132" stroke="#4a7aaa" stroke-width="0.5" stroke-dasharray="4,4" opacity="0.5"/>
+            <rect x="402" y="125" width="54" height="14" fill="#162030" rx="2"/>
+            <text x="429" y="135" fill="#4a7aaa" font-size="9" font-family="IBM Plex Mono" text-anchor="middle">ENTRY $106,100</text>
+
+            <!-- price axis labels -->
+            <text x="590" y="60" fill="#2a2a2a" font-size="8" font-family="IBM Plex Mono" text-anchor="end">108,500</text>
+            <text x="590" y="115" fill="#2a2a2a" font-size="8" font-family="IBM Plex Mono" text-anchor="end">107,000</text>
+            <text x="590" y="170" fill="#2a2a2a" font-size="8" font-family="IBM Plex Mono" text-anchor="end">105,500</text>
+
+            <!-- current price line -->
+            <line x1="0" y1="28" x2="390" y2="28" stroke="#5ab87e" stroke-width="0.5" opacity="0.3"/>
+            <rect x="460" y="22" width="80" height="14" fill="#0d1f16" rx="2"/>
+            <text x="500" y="32" fill="#4a9e6e" font-size="9" font-family="IBM Plex Mono" text-anchor="middle">▶ 107,420</text>
+          </svg>
+        </div>
+      </div>
+
+      <!-- RIGHT COL -->
+      <div class="right-col">
+
+        <!-- RL AGENT -->
+        <div class="agent-panel">
+          <div class="agent-header">
+            <div class="agent-indicator"></div>
+            <span class="agent-state">SCANNING MARKET</span>
+            <span class="agent-label">RL Agent v1</span>
+          </div>
+          <div class="agent-grid">
+            <div class="agent-stat">
+              <div class="agent-stat-label">Confidence</div>
+              <div class="agent-stat-val" style="color:#9c8040">68%</div>
+            </div>
+            <div class="agent-stat">
+              <div class="agent-stat-label">Session</div>
+              <div class="agent-stat-val">NY Open</div>
+            </div>
+            <div class="agent-stat">
+              <div class="agent-stat-label">Last action</div>
+              <div class="agent-stat-val">ETH Short</div>
+            </div>
+            <div class="agent-stat">
+              <div class="agent-stat-label">Outcome</div>
+              <div class="agent-stat-val" style="color:#a85555">-$18 SL</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- TRADE LOG -->
+        <div class="trades-panel">
+          <div class="panel-header">
+            <span class="panel-title">Recent Trades</span>
+            <div class="panel-spacer"></div>
+            <span style="color:#2a2a2a;font-size:9px;">why the agent traded</span>
+          </div>
+          <div style="overflow-y:auto;flex:1;">
+            <div class="trade-row">
+              <span class="trade-coin">BTC</span>
+              <span class="trade-dir long">LONG</span>
+              <span class="trade-reason">Strong momentum · high vol</span>
+              <span class="trade-pnl up">+$94</span>
+              <span class="trade-time">08:12</span>
+            </div>
+            <div class="trade-row">
+              <span class="trade-coin">ETH</span>
+              <span class="trade-dir short">SHORT</span>
+              <span class="trade-reason">Mean reversion · OB reject</span>
+              <span class="trade-pnl dn">-$18</span>
+              <span class="trade-time">06:44</span>
+            </div>
+            <div class="trade-row">
+              <span class="trade-coin">SOL</span>
+              <span class="trade-dir long">LONG</span>
+              <span class="trade-reason">Breakout confirmation</span>
+              <span class="trade-pnl up">+$41</span>
+              <span class="trade-time">03:20</span>
+            </div>
+            <div class="trade-row">
+              <span class="trade-coin">BTC</span>
+              <span class="trade-dir short">SHORT</span>
+              <span class="trade-reason">Liquidity sweep detected</span>
+              <span class="trade-pnl up">+$128</span>
+              <span class="trade-time">01:05</span>
+            </div>
+            <div class="trade-row">
+              <span class="trade-coin">ETH</span>
+              <span class="trade-dir long">LONG</span>
+              <span class="trade-reason">Range expansion · session open</span>
+              <span class="trade-pnl dn">-$32</span>
+              <span class="trade-time">00:18</span>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- BOTTOM STRIP -->
+<div class="bottom-strip">
+  <span class="strip-item">Margin used <span>$850</span></span>
+  <span class="strip-item">Available <span>$9,462</span></span>
+  <span class="strip-item">Paper balance <span>$10,000</span></span>
+  <span class="strip-item" style="margin-left:auto;">Hyperliquid · Mainnet</span>
+</div>
+
+<div class="feedback-bar">
+  <strong>Overview page</strong> — what you see when you open the app. Reply in the terminal with what you'd change.
+</div>
+
+</body>
+</html>
