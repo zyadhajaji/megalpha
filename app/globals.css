@@ -1,26 +1,113 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+@theme {
+  /* ── Backgrounds ── */
+  --color-bg:       #070707;
+  --color-surface:  #0c0c0c;
+  --color-s2:       #101010;
+  --color-b1:       #1c1c1c;
+  --color-b2:       #141414;
+  --color-b3:       #111;
+
+  /* ── Text ── */
+  --color-text:     #e8e8e8;
+  --color-sub:      #888888;
+  --color-dim:      #333333;
+
+  /* ── Green ── */
+  --color-green:    #3aaa72;
+  --color-gh:       #4ecf8a;
+  --color-gl:       #1d4a34;
+
+  /* ── Red ── */
+  --color-red:      #aa3a3a;
+  --color-rh:       #cf4e4e;
+  --color-rl:       #4a1d1d;
+
+  /* ── Blue ── */
+  --color-blue:     #3a6eaa;
+  --color-bh:       #4e8ecf;
+  --color-bl:       #1d304a;
+
+  /* ── Amber ── */
+  --color-amber:    #aa8a3a;
+  --color-ah:       #cfad4e;
+  --color-al:       #4a3c1d;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+:root { color-scheme: dark; }
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+  background: #070707;
+  color: #e8e8e8;
+  font-family: var(--font-mono), 'IBM Plex Mono', monospace;
+  font-size: 11px;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 3px; height: 3px; }
+::-webkit-scrollbar-track { background: #070707; }
+::-webkit-scrollbar-thumb { background: #222; border-radius: 2px; }
+
+/* ── Panel ── */
+.panel {
+  background: #0c0c0c;
+  border: 1px solid #1c1c1c;
+  border-radius: 5px;
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+/* ── Text utilities ── */
+.text-green  { color: #3aaa72; }
+.text-gh     { color: #4ecf8a; }
+.text-red    { color: #aa3a3a; }
+.text-rh     { color: #cf4e4e; }
+.text-blue   { color: #3a6eaa; }
+.text-bh     { color: #4e8ecf; }
+.text-amber  { color: #aa8a3a; }
+.text-ah     { color: #cfad4e; }
+.text-dim    { color: #333333; }
+.text-sub    { color: #888888; }
+
+/* ── NN Animations ── */
+@keyframes nn-flow {
+  0%   { stroke-dashoffset: 40; opacity: 0; }
+  20%  { opacity: 0.9; }
+  80%  { opacity: 0.9; }
+  100% { stroke-dashoffset: 0; opacity: 0; }
 }
+@keyframes nn-node-pulse {
+  0%, 100% { r: 5.5; opacity: 0.8; }
+  50%       { r: 7;   opacity: 1; }
+}
+@keyframes nn-node-glow {
+  0%, 100% { opacity: 0.6; }
+  50%      { opacity: 1; }
+}
+@keyframes nn-output-pulse {
+  0%, 100% { r: 7; opacity: 0.9; }
+  50%      { r: 9; opacity: 1; }
+}
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.4; }
+}
+@keyframes fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.nn-flow        { stroke-dasharray: 8 32; animation: nn-flow 2.4s linear infinite; }
+.nn-flow.d1     { animation-delay: 0.4s; }
+.nn-flow.d2     { animation-delay: 0.8s; }
+.nn-flow.d3     { animation-delay: 1.2s; }
+.nn-flow.d4     { animation-delay: 1.6s; }
+.nn-flow.d5     { animation-delay: 2.0s; }
+.nn-active      { animation: nn-node-pulse 2.4s ease-in-out infinite; }
+.nn-glow        { animation: nn-node-glow 2s ease-in-out infinite; }
+.nn-output      { animation: nn-output-pulse 2.4s ease-in-out infinite; }
+.pulse-dot      { animation: pulse-dot 2s ease-in-out infinite; }
+.fade-in        { animation: fade-in 0.3s ease-out; }
