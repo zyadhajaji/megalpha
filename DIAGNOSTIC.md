@@ -223,7 +223,7 @@ The project scope expanded significantly. MEGALPHA is now a full quantitative tr
 
 | Phase | What | Key deliverable |
 |---|---|---|
-| **1** | Layout redesign + full historical charts | New shell, sidebar nav, neural net panel, paginated candle endpoint |
+| **1** | Layout redesign + full historical charts | ✅ Complete |
 | **2** | Backtest engine | `server/backtest.py`, `/backtest` endpoint, BacktestPanel |
 | **3** | RL agent | `server/train_rl.py`, PPO policy, live inference in broadcast loop |
 | **4** | Data hub | Funding rates, OI, liquidations, news feed |
