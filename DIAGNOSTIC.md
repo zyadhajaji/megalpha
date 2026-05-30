@@ -30,7 +30,8 @@ MEGALPHA is a **professional quantitative trading platform** built around a loca
 localhost:3000   Next.js dashboard
 localhost:8000   Python bridge server
   prices:        live BTC/ETH/SOL from HL WS allMids
-  candles:       disk cache — 15m/1h/4h ~5,000 each · 1d ~1,250–1,300 (HL retention cap)
+  candles:       since-launch via Binance backfill — 1h ~31k (3.5y) · 15m ~124k · 4h ~7.8k · 1d ~1.3k
+                 (HL retains only the recent ~5k/interval; older history backfilled from Binance, HL wins overlap)
   order book:    12 bid + 12 ask levels per coin (live l2Book)
   RL agent:      PPO policy loaded · 12-feature obs · paper-forward every 10s
   hl_configured: true (private key in server/.env — gitignored, never committed)
@@ -115,6 +116,7 @@ localhost:8000   Python bridge server
 | `backtest.py` | Pure-Python engine — 6 strategies, realistic costs (fee+slippage+funding), buy-hold benchmark, walk-forward, mark-to-market equity. Indicator helpers reused by `rl_features.py`. |
 | `risk.py` | **Shared risk module** — `RiskConfig` + % sizing, stop-loss/TP, max-DD kill-switch. Used by the backtester now; live execution (#19) later. |
 | `candle_cache.py` | Disk-backed full-history cache — `server/cache/{COIN}_{interval}.json` (gitignored). |
+| `binance_history.py` | One-time Binance backfill — prepends since-launch history (1h/15m/4h) before HL's recent window; HL wins overlaps. Live updates stay HL-only. |
 | `hl_trader.py` | Hyperliquid trading module (market open/close/cancel). Not auto-invoked. |
 | `.env` | `HL_PRIVATE_KEY` — **gitignored, never committed.** |
 | `models/` | Trained policies (`rl_policy_active.zip` + meta json). **Gitignored** — retrain after cloning. |
