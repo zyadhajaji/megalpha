@@ -7,6 +7,7 @@ export interface Candle {
   high: number;
   low: number;
   close: number;
+  volume?: number; // base-asset volume (present from REST/cache; absent on live-built 1m candles)
 }
 
 export interface HLPosition {

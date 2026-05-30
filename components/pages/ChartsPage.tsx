@@ -13,6 +13,7 @@ export default function ChartsPage({ hl }: Props) {
       <ChartPanel
         liveCandles={hl.candles}
         prices={hl.prices}
+        advanced
       />
     </div>
   );

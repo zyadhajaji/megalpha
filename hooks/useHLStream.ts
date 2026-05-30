@@ -12,9 +12,19 @@ interface HLPrices {
   sol: number;
 }
 
-interface OrderBookMetrics {
+export interface OrderBookLevel {
+  px: number;
+  sz: number;
+}
+
+export interface OrderBookMetrics {
+  bids: OrderBookLevel[];
+  asks: OrderBookLevel[];
+  mid: number;
+  spread: number;
   spread_bps: number;
   bid_ask_ratio: number;
+  imbalance: number;
 }
 
 export interface HLStreamData {

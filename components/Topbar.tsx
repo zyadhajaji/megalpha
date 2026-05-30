@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import type { HLAccount } from "@/lib/types";
 
 interface Prices {
@@ -33,7 +34,14 @@ function PriceChip({ label, price, prevPrice }: { label: string; price: number; 
 }
 
 export default function Topbar({ prices, connected }: Props) {
-  const now = new Date().toUTCString().slice(17, 25); // HH:MM:SS
+  // Render clock only after mount so SSR and client markup match (no hydration mismatch)
+  const [now, setNow] = useState<string>("");
+  useEffect(() => {
+    const tick = () => setNow(new Date().toUTCString().slice(17, 25)); // HH:MM:SS
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, []);
 
   return (
     <div
@@ -91,7 +99,7 @@ export default function Topbar({ prices, connected }: Props) {
             {connected ? "LIVE" : "OFFLINE"}
           </span>
         </div>
-        <span style={{ fontSize: 10, color: "#2a2a2a" }}>{now} UTC</span>
+        <span style={{ fontSize: 10, color: "#555" }} suppressHydrationWarning>{now ? `${now} UTC` : ""}</span>
       </div>
     </div>
   );

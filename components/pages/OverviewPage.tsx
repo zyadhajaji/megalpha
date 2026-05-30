@@ -4,6 +4,7 @@ import type { HLStreamData } from "@/hooks/useHLStream";
 import HeroRow from "@/components/HeroRow";
 import ChartPanel from "@/components/ChartPanel";
 import RLNetworkPanel from "@/components/RLNetworkPanel";
+import OrderBook from "@/components/OrderBook";
 import PnlCard from "@/components/PnlCard";
 import TradeLog from "@/components/TradeLog";
 import BottomBar from "@/components/BottomBar";
@@ -65,7 +66,12 @@ export default function OverviewPage({ hl, trading: _trading }: Props) {
         {/* Right column */}
         <div style={{ display: "flex", flexDirection: "column", gap: 8, minHeight: 0 }}>
           <PnlCard hlAccount={hl.hlAccount} />
-          <TradeLog />
+          <div style={{ flex: 1.3, minHeight: 0, display: "flex" }}>
+            <OrderBook orderBook={hl.orderBook} connected={hl.connected} />
+          </div>
+          <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
+            <TradeLog />
+          </div>
         </div>
       </div>
 

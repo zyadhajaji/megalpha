@@ -20,6 +20,8 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+import candle_cache
 # ─── env / logging ────────────────────────────────────────────────────────────
 
 load_dotenv(Path(__file__).parent / ".env")
@@ -86,6 +88,20 @@ order_books: dict[str, dict]       = {}
 clients: list[WebSocket]           = []
 hl_account_cache: dict             = {}
 
+# ─── RL agent state (Phase 3) ─────────────────────────────────────────────────
+
+rl_model = None          # loaded PPO policy, or None if not trained / deps missing
+rl_meta: dict            = {}            # {coin, interval, size_usd, leverage}
+rl_state: Optional[dict] = None          # latest inference result for the dashboard
+RL_INFER_SECS = 10.0     # how often to run live inference
+
+# Paper-forward trading: the agent trades simulated money on real live prices so we
+# can watch a true out-of-sample equity path. Resets when the bridge restarts.
+rl_history: list = []        # rolling path: [{t, price, position, equity}]
+rl_paper: dict = {"position": 0, "entry_px": 0.0, "realized": 0.0,
+                  "trades": 0, "wins": 0, "peak": 0.0, "max_dd": 0.0}
+RL_HISTORY_MAX = 180
+
 # ─── candle builder ───────────────────────────────────────────────────────────
 
 def push_trade(coin: str, px: float, ts_ms: int) -> None:
@@ -117,21 +133,215 @@ def calc_momentum(hist: list[float]) -> int:
     return int(max(0, min(100, 50 + pct * 10)))
 
 
+def _level_px(lvl) -> float:
+    # HL returns levels as {"px","sz","n"}; tolerate legacy [px, sz] lists too
+    return float(lvl["px"]) if isinstance(lvl, dict) else float(lvl[0])
+
+
+def _level_sz(lvl) -> float:
+    return float(lvl["sz"]) if isinstance(lvl, dict) else float(lvl[1])
+
+
+OB_DEPTH = 12   # ladder levels per side sent to the dashboard
+
+
 def order_book_metrics(coin: str) -> dict:
+    """Live L2 snapshot for a coin: top-N bid/ask ladder plus derived metrics.
+
+    HL sends levels as ob["levels"] = [bids, asks], each a list of {"px","sz","n"},
+    best price first. We tolerate legacy [px, sz] list rows too.
+    """
     ob = order_books.get(coin)
     if not ob:
         return {}
-    levels = ob.get("levels", [[], []])
-    bids = levels[0][:5] if levels else []
-    asks = levels[1][:5] if levels else []
-    if not bids or not asks:
+    levels = ob.get("levels")
+    if not isinstance(levels, (list, tuple)) or len(levels) < 2:
         return {}
-    best_bid, best_ask = float(bids[0][0]), float(asks[0][0])
-    mid = (best_bid + best_ask) / 2
-    spread_bps = round(((best_ask - best_bid) / mid) * 10_000, 2) if mid else 0
-    bid_vol = sum(float(b[1]) for b in bids)
-    ask_vol = sum(float(a[1]) for a in asks)
-    return {"spread_bps": spread_bps, "bid_ask_ratio": round(bid_vol / (ask_vol + 1e-9), 3)}
+    raw_bids = levels[0][:OB_DEPTH]
+    raw_asks = levels[1][:OB_DEPTH]
+    if not raw_bids or not raw_asks:
+        return {}
+    try:
+        bids = [{"px": _level_px(b), "sz": _level_sz(b)} for b in raw_bids]
+        asks = [{"px": _level_px(a), "sz": _level_sz(a)} for a in raw_asks]
+        best_bid, best_ask = bids[0]["px"], asks[0]["px"]
+        mid = (best_bid + best_ask) / 2
+        spread = best_ask - best_bid
+        spread_bps = round((spread / mid) * 10_000, 2) if mid else 0.0
+        bid_vol = sum(b["sz"] for b in bids)
+        ask_vol = sum(a["sz"] for a in asks)
+        total_vol = bid_vol + ask_vol
+    except (KeyError, IndexError, ValueError, TypeError):
+        return {}
+    return {
+        "bids":          bids,
+        "asks":          asks,
+        "mid":           round(mid, 4),
+        "spread":        round(spread, 4),
+        "spread_bps":    spread_bps,
+        "bid_ask_ratio": round(bid_vol / (ask_vol + 1e-9), 3),
+        "imbalance":     round((bid_vol - ask_vol) / (total_vol + 1e-9), 3),
+    }
+
+# ─── RL inference (Phase 3) ───────────────────────────────────────────────────
+
+def _trading_session() -> str:
+    h = time.gmtime().tm_hour            # UTC
+    if 7 <= h < 12:   return "London"
+    if 12 <= h < 21:  return "NY"
+    if 0 <= h < 7:    return "Asia"
+    return "Off-hours"
+
+
+def load_rl_policy() -> None:
+    """Load the trained PPO policy if it exists and deps are installed. Safe to call always."""
+    global rl_model, rl_meta
+    models_dir = Path(__file__).parent / "models"
+    active = models_dir / "rl_policy_active.zip"
+    meta_f = models_dir / "rl_policy_active.json"
+    if not active.exists():
+        log.info("RL: no trained policy found (train with server/train_rl.py) — panel stays offline")
+        return
+    try:
+        from stable_baselines3 import PPO
+    except ImportError:
+        log.info("RL: policy file present but stable-baselines3/torch not installed — skipping inference")
+        return
+    try:
+        rl_model = PPO.load(str(active.with_suffix("")), device="cpu")
+        # Staleness guard: a saved policy from an older feature set has a different
+        # observation width. Feeding it the current observation would error every
+        # cycle, so refuse to load and ask for a retrain instead.
+        from rl_features import N_FEATURES
+        model_dim = int(rl_model.observation_space.shape[0])
+        if model_dim != N_FEATURES:
+            log.warning("RL: saved policy expects %d features but the current feature set "
+                        "has %d — retrain with server/train_rl.py. Inference disabled.",
+                        model_dim, N_FEATURES)
+            rl_model = None
+            return
+        if meta_f.exists():
+            rl_meta = json.loads(meta_f.read_text(encoding="utf-8"))
+        log.info("RL: policy loaded — %s", rl_meta or "(no meta)")
+    except Exception as exc:
+        log.warning("RL: failed to load policy: %s", exc)
+
+
+async def rl_inference_loop() -> None:
+    """Every RL_INFER_SECS: observe, predict, and paper-trade on real live prices.
+
+    The agent trades simulated money so the dashboard can show a genuine forward
+    (out-of-sample) equity path, the action probabilities, and the exact feature
+    vector the policy is reading. No real orders are ever placed.
+    """
+    global rl_state
+    if rl_model is None:
+        return
+    import time
+    from rl_features import compute_indicators, observation, WARMUP, FEATURE_LABELS
+
+    coin     = (rl_meta.get("coin") or "BTC").upper()
+    interval = rl_meta.get("interval") or "1h"
+    interval_ms = INTERVAL_MS.get(interval, 3_600_000)
+    launch_ms   = COIN_START_MS.get(coin, COIN_START_MS["BTC"])
+    size = float(rl_meta.get("size_usd") or 200.0)
+    lev  = float(rl_meta.get("leverage") or 5)
+    fee_per_side = (4.0 / 10_000.0) * size * lev   # HL taker ~3.5–4bps on notional
+    episode = 0
+
+    while True:
+        await asyncio.sleep(RL_INFER_SECS)
+        episode += 1
+        try:
+            candle_data = await candle_cache.get_history(
+                coin, interval, launch_ms, interval_ms, fetch_candles_paginated
+            )
+            if len(candle_data) < WARMUP + 2:
+                continue
+            ind = compute_indicators(candle_data)
+            i   = len(candle_data) - 1
+
+            # Observe with the agent's OWN paper position so the forward test is
+            # self-consistent (the policy sees the position it is actually holding).
+            held = rl_paper["position"]
+            obs  = observation(ind, i, held)
+            action, _ = rl_model.predict(obs, deterministic=True)
+            probs = _action_probs(obs)                  # [hold, long, short]
+            action_probs = [probs[1], probs[0], probs[2]]   # frontend wants [long, hold, short]
+            target = {0: 0, 1: 1, 2: -1}[int(action)]
+
+            # Live mark price (fall back to the latest candle close)
+            px = float(prices.get(coin.lower(), 0.0)) or float(ind["closes"][i])
+
+            unreal = 0.0
+            if px > 0:
+                # Fill: close→open when the target position changes, charging fees per side
+                if target != rl_paper["position"]:
+                    if rl_paper["position"] != 0 and rl_paper["entry_px"] > 0:
+                        move = (px - rl_paper["entry_px"]) / rl_paper["entry_px"]
+                        realized = rl_paper["position"] * move * size * lev
+                        rl_paper["realized"] += realized
+                        rl_paper["trades"]   += 1
+                        if realized > 0:
+                            rl_paper["wins"] += 1
+                    sides = (1 if rl_paper["position"] != 0 else 0) + (1 if target != 0 else 0)
+                    rl_paper["realized"] -= sides * fee_per_side
+                    rl_paper["position"]  = target
+                    rl_paper["entry_px"]  = px if target != 0 else 0.0
+
+                if rl_paper["position"] != 0 and rl_paper["entry_px"] > 0:
+                    move = (px - rl_paper["entry_px"]) / rl_paper["entry_px"]
+                    unreal = rl_paper["position"] * move * size * lev
+
+                equity = rl_paper["realized"] + unreal
+                rl_paper["peak"]   = max(rl_paper["peak"], equity)
+                rl_paper["max_dd"] = max(rl_paper["max_dd"], rl_paper["peak"] - equity)
+                rl_history.append({"t": int(time.time() * 1000), "price": round(px, 4),
+                                   "position": rl_paper["position"], "equity": round(equity, 2)})
+                if len(rl_history) > RL_HISTORY_MAX:
+                    del rl_history[: len(rl_history) - RL_HISTORY_MAX]
+            else:
+                equity = rl_paper["realized"]
+
+            features = [
+                {"key": k, "label": lbl, "value": round(float(obs[idx]), 3)}
+                for idx, (k, lbl) in enumerate(FEATURE_LABELS)
+            ]
+            trades = rl_paper["trades"]
+            rl_state = {
+                "status":       "in_trade" if rl_paper["position"] != 0 else "scanning",
+                "confidence":   round(float(max(probs)), 3),
+                "action_probs": [round(p, 3) for p in action_probs],
+                "episode":      episode,
+                "session":      _trading_session(),
+                "last_action":  f"{coin} {['HOLD','LONG','SHORT'][int(action)]}",
+                "position":     rl_paper["position"],
+                "features":     features,
+                "paper": {
+                    "equity":     round(equity, 2),
+                    "realized":   round(rl_paper["realized"], 2),
+                    "unrealized": round(unreal, 2),
+                    "trades":     trades,
+                    "win_rate":   round(rl_paper["wins"] / trades * 100, 1) if trades else 0.0,
+                    "max_dd":     round(rl_paper["max_dd"], 2),
+                    "position":   rl_paper["position"],
+                },
+                "last_pnl":     round(equity, 2),
+            }
+        except Exception as exc:
+            log.debug("RL inference error: %s", exc)
+
+
+def _action_probs(obs) -> list[float]:
+    """Return softmax action probabilities [hold, long, short] for an observation."""
+    import numpy as np
+    import torch
+    obs_t = torch.as_tensor(obs).float().unsqueeze(0)
+    with torch.no_grad():
+        dist = rl_model.policy.get_distribution(obs_t)
+        probs = dist.distribution.probs.squeeze(0).cpu().numpy()
+    return [float(p) for p in probs]
+
 
 # ─── paginated candle fetch ───────────────────────────────────────────────────
 
@@ -143,23 +353,25 @@ async def fetch_candles_paginated(
     max_total: int = 5000,
 ) -> list[dict]:
     """
-    Fetch candles from Hyperliquid REST API with automatic pagination.
-    Each request returns max 500 candles; this paginates until end_ms is reached
-    or max_total candles are collected.
+    Fetch candles from Hyperliquid REST API.
+
+    HL's candleSnapshot caps each response at ~5000 candles and returns the MOST
+    RECENT window ending at endTime (it ignores how far back startTime is). So we
+    page BACKWARD: each request asks for [start_ms, cursor_end], then we move
+    cursor_end to just before the earliest candle returned and repeat — until we
+    reach start_ms, HL runs out of retained history, or max_total is hit.
     """
     import urllib.request as _req
     import json as _j
 
     url = "https://api.hyperliquid.xyz/info"
     interval_ms = INTERVAL_MS.get(interval, 3_600_000)
-    chunk_ms = HL_MAX_CANDLES_PER_REQUEST * interval_ms
     all_candles: list[dict] = []
-    cursor = start_ms
+    cursor_end = end_ms
+    prev_earliest: Optional[int] = None
 
-    while cursor < end_ms and len(all_candles) < max_total:
-        chunk_end = min(cursor + chunk_ms, end_ms)
-
-        def _fetch(c=coin, s=cursor, e=chunk_end, iv=interval):
+    while cursor_end > start_ms and len(all_candles) < max_total:
+        def _fetch(c=coin, s=start_ms, e=cursor_end, iv=interval):
             payload = _j.dumps({
                 "type": "candleSnapshot",
                 "req": {"coin": c, "interval": iv, "startTime": s, "endTime": e}
@@ -175,7 +387,7 @@ async def fetch_candles_paginated(
             break
 
         if not result:
-            break
+            break   # HL has no more retained history this far back
 
         for c in result:
             all_candles.append({
@@ -184,16 +396,21 @@ async def fetch_candles_paginated(
                 "high":  float(c["h"]),
                 "low":   float(c["l"]),
                 "close": float(c["c"]),
+                "volume": float(c.get("v", 0.0)),
             })
 
-        # Advance cursor past the last returned candle
-        last_t = result[-1]["t"]
-        cursor = last_t + interval_ms
+        earliest_t = result[0]["t"]
+        # Stop if HL stopped giving us older data (no progress) or we reached the start
+        if prev_earliest is not None and earliest_t >= prev_earliest:
+            break
+        prev_earliest = earliest_t
+        if earliest_t <= start_ms:
+            break
 
-        # Rate limit — be gentle
-        await asyncio.sleep(0.2)
+        cursor_end = earliest_t - interval_ms
+        await asyncio.sleep(0.2)   # gentle on rate limits
 
-    # Deduplicate by time (HL can return overlapping candles at boundaries)
+    # Deduplicate by time (HL returns overlapping candles at window boundaries)
     seen: set[int] = set()
     unique: list[dict] = []
     for c in all_candles:
@@ -221,6 +438,8 @@ def build_payload() -> dict:
     }
     if hl_account_cache:
         payload["hlAccount"] = hl_account_cache
+    if rl_state:
+        payload["rl_agent"] = rl_state
     return payload
 
 # ─── FastAPI app ──────────────────────────────────────────────────────────────
@@ -228,7 +447,7 @@ def build_payload() -> dict:
 app = FastAPI(title="MEGALPHA Bridge")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+",  # any local dev port
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -339,6 +558,7 @@ async def fetch_historical_candles() -> None:
                     "high":  float(c["h"]),
                     "low":   float(c["l"]),
                     "close": float(c["c"]),
+                    "volume": float(c.get("v", 0.0)),
                 })
             log.info("Pre-loaded %d candles for %s", len(candles[coin]), coin)
         except Exception as exc:
@@ -346,12 +566,36 @@ async def fetch_historical_candles() -> None:
         await asyncio.sleep(0.5)  # be gentle with HL rate limits
 
 
+async def prewarm_history_cache() -> None:
+    """
+    Build the full-history disk cache for the most-used timeframes in the background
+    so the first chart load is instant. Cold (first ever) run fetches from each token's
+    launch; later runs only fetch the delta. Runs sequentially to respect HL rate limits.
+    """
+    await asyncio.sleep(2)  # let the live listener connect first
+    for interval in ("15m", "1h", "4h", "1d"):
+        for coin in COINS:
+            try:
+                history = await candle_cache.get_history(
+                    coin, interval,
+                    COIN_START_MS.get(coin, COIN_START_MS["BTC"]),
+                    INTERVAL_MS[interval],
+                    fetch_candles_paginated,
+                )
+                log.info("Cache warm: %s %s → %d candles", coin, interval, len(history))
+            except Exception as exc:
+                log.warning("Cache warm failed (%s %s): %s", coin, interval, exc)
+
+
 @app.on_event("startup")
 async def startup() -> None:
+    load_rl_policy()
     asyncio.create_task(fetch_historical_candles())
     asyncio.create_task(hl_listener())
     asyncio.create_task(broadcaster())
     asyncio.create_task(account_poller())
+    asyncio.create_task(prewarm_history_cache())
+    asyncio.create_task(rl_inference_loop())
 
 # ─── WebSocket endpoint ───────────────────────────────────────────────────────
 
@@ -440,24 +684,79 @@ async def get_candles(
     if interval not in INTERVAL_MS:
         return []
 
-    now_ms = int(time.time() * 1000)
+    interval_ms = INTERVAL_MS[interval]
+    launch_ms   = COIN_START_MS.get(coin, COIN_START_MS["BTC"])
+    now_ms      = int(time.time() * 1000)
 
-    # Determine start
+    if limit > 0:
+        # Bounded recent window — fetch directly (avoids a full cold fetch for fine intervals)
+        start_ms = start_time if start_time > 0 else now_ms - (limit * interval_ms)
+        return await fetch_candles_paginated(coin, interval, start_ms, now_ms, limit)
+
+    # Full history from token launch — served from disk cache, delta-updated, complete from day 1
+    history = await candle_cache.get_history(
+        coin, interval, launch_ms, interval_ms, fetch_candles_paginated
+    )
     if start_time > 0:
-        start_ms = start_time
-    elif limit > 0:
-        # Calculate start from limit
-        interval_ms = INTERVAL_MS[interval]
-        start_ms = now_ms - (limit * interval_ms)
-    else:
-        # Full history
-        start_ms = COIN_START_MS.get(coin, COIN_START_MS["BTC"])
+        cutoff = start_time // 1000   # cache stores time in seconds
+        history = [c for c in history if c["time"] >= cutoff]
+    return history
 
-    # Cap total candles to avoid runaway fetches
-    max_total = limit if limit > 0 else 10_000
+# ─── backtest endpoint ────────────────────────────────────────────────────────
 
-    candle_list = await fetch_candles_paginated(coin, interval, start_ms, now_ms, max_total)
-    return candle_list
+class BacktestRequest(BaseModel):
+    coin: str = "BTC"
+    interval: str = "1h"
+    starting_balance: float = 10_000.0
+    size_usd: float = 200.0
+    leverage: int = 5
+    strategy: str = "momentum"   # see backtest.STRATEGIES
+    fee_bps: float = 3.5         # taker fee per side
+    limit: int = 0               # 0 = full history
+
+
+@app.post("/backtest")
+async def run_backtest_endpoint(req: BacktestRequest) -> dict:
+    from backtest import run_backtest, STRATEGIES
+
+    coin = req.coin.upper()
+    if coin not in COINS:
+        return {"error": f"Unknown coin: {coin}"}
+    if req.strategy not in STRATEGIES:
+        return {"error": f"Unknown strategy: {req.strategy}. Options: {', '.join(STRATEGIES)}"}
+
+    if req.interval not in INTERVAL_MS:
+        return {"error": f"Unknown interval: {req.interval}"}
+
+    interval_ms = INTERVAL_MS[req.interval]
+    launch_ms   = COIN_START_MS.get(coin, COIN_START_MS["BTC"])
+
+    # Full history from cache (complete from day 1, fast after first load)
+    candle_data = await candle_cache.get_history(
+        coin, req.interval, launch_ms, interval_ms, fetch_candles_paginated
+    )
+    if req.limit > 0:
+        candle_data = candle_data[-req.limit:]
+    if not candle_data:
+        return {"error": "No candle data returned"}
+
+    result = await asyncio.to_thread(
+        run_backtest,
+        candle_data,
+        req.starting_balance,
+        req.size_usd,
+        req.leverage,
+        req.strategy,
+        req.fee_bps,
+    )
+    result["meta"] = {
+        "coin":     coin,
+        "interval": req.interval,
+        "strategy": req.strategy,
+        "candles":  len(candle_data),
+    }
+    return result
+
 
 # ─── health check ─────────────────────────────────────────────────────────────
 
@@ -469,6 +768,18 @@ async def health() -> dict:
         "candle_counts": {c: len(candles[c]) for c in COINS},
         "clients": len(clients),
         "hl_configured": hl_trader is not None,
+        "rl_loaded": rl_model is not None,
+        "rl_meta": rl_meta,
+    }
+
+
+@app.get("/rl/status")
+async def rl_status() -> dict:
+    return {
+        "loaded":  rl_model is not None,
+        "meta":    rl_meta,
+        "state":   rl_state,
+        "history": rl_history,
     }
 
 

@@ -39,3 +39,19 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# candle cache (generated at runtime)
+/server/cache/
+/server/bridge.log
+/server/bridge.err.log
+/server/models/
+
+# python
+__pycache__/
+*.pyc
+
+# logs (all)
+*.log
+
+# brainstorm / scratch — not part of the repo
+.superpowers/
