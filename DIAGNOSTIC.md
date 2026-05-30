@@ -15,7 +15,7 @@ MEGALPHA is a **professional quantitative trading platform** built around a loca
 | **2** | Backtest engine + live order book + 1m chart fix | ✅ **Complete** |
 | **2.5** | Chart indicators (MA/BB/Vol/RSI/MACD/Fib) + crosshair legend | ✅ **Complete** |
 | **3** | RL agent (PPO, local) + live paper-forward + dashboard | ✅ **Complete** |
-| **3.5** | Backtest rigor (slippage/funding, walk-forward, kill-switch) | 🔲 In progress |
+| **3.5** | Backtest rigor (costs, walk-forward, benchmark, kill-switch) | ✅ engine done · strategy-save/live/charts/WS left |
 | **4** | Data hub (funding, OI, liquidations, news) | 🔲 Planned |
 | **5** | Journal (Notion-style, SQLite) | 🔲 Planned |
 | **6** | 24/7 cloud deployment (Oracle free VM) | ⏸ Paused (scaffold pending) |
@@ -51,17 +51,18 @@ localhost:8000   Python bridge server
 | **Live paper-forward**: agent trades simulated $ on real live prices, equity path | ✅ |
 | **RL Agent dashboard**: live decision, prob bars, paper P&L + equity sparkline, 12-feature gauges | ✅ |
 | Live-inference staleness guard (rejects a model whose feature width ≠ current) | ✅ |
+| **Backtest realistic costs** (fee + slippage + funding) + **buy-hold benchmark/alpha** | ✅ |
+| **Walk-forward validation** + shared **risk module** (`risk.py`: sizing, stop, kill-switch) | ✅ |
 | Pytest suite: candle endpoint | ✅ |
 
 ### What is NOT built yet
 
 | Feature | Phase |
 |---|---|
-| Realistic backtest cost model (slippage + funding) | 3.5 |
-| Walk-forward validation + buy-and-hold benchmark in the backtest engine | 3.5 |
-| Risk / kill-switch layer (stop-loss, max-DD, sizing) in backtest | 3.5 |
 | Save/load **named** strategies + forward-test a saved one | 3.5 |
 | Manual-confirm Hyperliquid order screen (per-order confirm; no auto-execution) | 3.5 |
+| Live-execution hardening: query-position-before-order, reduceOnly closes, slippage guard, per-trade % size cap, live max-DD kill-switch, post-only/maker option, partial-fill handling, 60s reconciliation, unified trade-config | 3.5 |
+| WS robustness: exponential-backoff reconnect (1s→30s) + `userFills`/`webData2` live position+fill feed (replace REST account polling) | 3.5 |
 | Deeper chart history (BTC/ETH/SOL from launch, beyond HL's ~5k cap) | 3.5 |
 | Funding / OI / liquidations / news (Data Hub) | 4 |
 | Journal (Tiptap + SQLite) | 5 |
@@ -111,7 +112,8 @@ localhost:8000   Python bridge server
 | `rl_features.py` | **Single source of truth for the observation.** `N_FEATURES=12`, `WARMUP=50`, `FEATURE_LABELS` (shared with the dashboard). 12 self-bounded features; `compute_indicators()` + `observation()`. Imports `_ema/_rsi/_atr/_sma/_rolling_std/_macd` from `backtest.py`. |
 | `trading_env.py` | Gymnasium env. Reward = leveraged return − fees − **turnover penalty** − **drawdown-deepening penalty** (all tunable). Obs space = `Box(-1,1, (12,))`. |
 | `train_rl.py` | PPO training: 80/20 chronological split, reward-only `VecNormalize`, `EvalCallback` keeps the **best out-of-sample checkpoint**, `net_arch=[128,128]`, LR decay, CLI knobs (`--turnover --dd-penalty --lr --ent-coef`). Rich eval: Sharpe, max DD, turnover, exposure, vs buy-and-hold. Saves `rl_{COIN}_{interval}.zip` + `rl_policy_active.zip` + `rl_policy_active.json`. |
-| `backtest.py` | Pure-Python engine — 6 strategies (all long+short), taker fees, next-open fills, ATR brackets, 18 stats. Indicator helpers reused by `rl_features.py`. |
+| `backtest.py` | Pure-Python engine — 6 strategies, realistic costs (fee+slippage+funding), buy-hold benchmark, walk-forward, mark-to-market equity. Indicator helpers reused by `rl_features.py`. |
+| `risk.py` | **Shared risk module** — `RiskConfig` + % sizing, stop-loss/TP, max-DD kill-switch. Used by the backtester now; live execution (#19) later. |
 | `candle_cache.py` | Disk-backed full-history cache — `server/cache/{COIN}_{interval}.json` (gitignored). |
 | `hl_trader.py` | Hyperliquid trading module (market open/close/cancel). Not auto-invoked. |
 | `.env` | `HL_PRIVATE_KEY` — **gitignored, never committed.** |
@@ -159,11 +161,11 @@ The current BTC 1h / 200k policy **learned to abstain (HOLD)** — once realisti
 
 ---
 
-## 6. BACKTEST ENGINE (Phase 2) — unchanged this pass
+## 6. BACKTEST ENGINE (Phase 2 + 3.5 rigor — done)
 
-`run_backtest(candles, starting_balance, size_usd, leverage, strategy, fee_bps=3.5)` → `{trades, equity_curve, stats}`. 6 strategies (momentum, breakout, mean_reversion, ema_cross, macd, bollinger), all long+short, next-open fills, ATR brackets for breakout, 18 stats. `POST /backtest` validates against `STRATEGIES`.
+`run_backtest(candles, starting_balance, size_usd, leverage, strategy, fee_bps, slippage_bps, funding_apr, risk)` → `{trades, equity_curve, buy_hold_curve, stats}`. 6 strategies (all long+short), next-open fills, ATR brackets, **mark-to-market equity**. **Realistic costs:** taker fee + per-side slippage + perpetual funding drag. **Benchmark:** buy-and-hold curve + alpha every run. **Risk (`risk.py`, shared with live):** % sizing, stop-loss/take-profit, max-drawdown kill-switch. **Walk-forward:** `run_walk_forward()` over N out-of-sample folds → per-fold stats + consistency. Endpoints: `POST /backtest`, `POST /backtest/walkforward`.
 
-**Phase 3.5 will add:** slippage + funding cost model, walk-forward validation, an in-engine buy-and-hold benchmark, and a stop-loss / max-drawdown kill-switch with sizing.
+**Edge-sweep finding** (BTC/ETH/SOL × 15m/1h/4h/1d × 6 strategies, realistic costs): of 72 combos only **3 are "robust"** (return > 0 **and** alpha > 0 **and** Sharpe > 0.5 **and** walk-forward consistency ≥ 0.6): **ETH 4h macd** (alpha +8%), **SOL 4h bollinger** (alpha +5%), **SOL 1d ema_cross**. 15m is uniformly noise-after-costs. Takeaway: no slam-dunk edge, but **4h is clearly the most promising timeframe** — the strongest case for retraining the RL agent on 4h (ETH/SOL) rather than 1h. Still far from "deploy real money."
 
 ---
 

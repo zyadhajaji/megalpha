@@ -710,50 +710,79 @@ class BacktestRequest(BaseModel):
     starting_balance: float = 10_000.0
     size_usd: float = 200.0
     leverage: int = 5
-    strategy: str = "momentum"   # see backtest.STRATEGIES
-    fee_bps: float = 3.5         # taker fee per side
-    limit: int = 0               # 0 = full history
+    strategy: str = "momentum"      # see backtest.STRATEGIES
+    fee_bps: float = 3.5            # taker fee per side
+    slippage_bps: float = 2.0      # per side, baked into fills (realistic cost model)
+    funding_apr: float = 0.10      # assumed avg perpetual funding drag (conservative)
+    stop_loss_pct: float = 0.0     # risk layer — fraction of margin (0 = off)
+    take_profit_pct: float = 0.0
+    max_drawdown_pct: float = 0.0  # equity-drawdown kill switch (0 = off)
+    max_position_pct: float = 0.0  # margin per trade as fraction of equity (0 = fixed size)
+    folds: int = 5                 # walk-forward segments
+    limit: int = 0                 # 0 = full history
+
+
+def _risk_from(req: "BacktestRequest"):
+    from risk import RiskConfig
+    return RiskConfig(
+        stop_loss_pct=req.stop_loss_pct, take_profit_pct=req.take_profit_pct,
+        max_drawdown_pct=req.max_drawdown_pct, max_position_pct=req.max_position_pct,
+    )
+
+
+async def _backtest_candles(req: "BacktestRequest"):
+    """Shared: validate + load full cached history. Returns (candles, coin, error)."""
+    coin = req.coin.upper()
+    if coin not in COINS:
+        return None, coin, {"error": f"Unknown coin: {coin}"}
+    if req.interval not in INTERVAL_MS:
+        return None, coin, {"error": f"Unknown interval: {req.interval}"}
+    interval_ms = INTERVAL_MS[req.interval]
+    launch_ms   = COIN_START_MS.get(coin, COIN_START_MS["BTC"])
+    data = await candle_cache.get_history(coin, req.interval, launch_ms, interval_ms, fetch_candles_paginated)
+    if req.limit > 0:
+        data = data[-req.limit:]
+    if not data:
+        return None, coin, {"error": "No candle data returned"}
+    return data, coin, None
 
 
 @app.post("/backtest")
 async def run_backtest_endpoint(req: BacktestRequest) -> dict:
     from backtest import run_backtest, STRATEGIES
-
-    coin = req.coin.upper()
-    if coin not in COINS:
-        return {"error": f"Unknown coin: {coin}"}
     if req.strategy not in STRATEGIES:
         return {"error": f"Unknown strategy: {req.strategy}. Options: {', '.join(STRATEGIES)}"}
-
-    if req.interval not in INTERVAL_MS:
-        return {"error": f"Unknown interval: {req.interval}"}
-
-    interval_ms = INTERVAL_MS[req.interval]
-    launch_ms   = COIN_START_MS.get(coin, COIN_START_MS["BTC"])
-
-    # Full history from cache (complete from day 1, fast after first load)
-    candle_data = await candle_cache.get_history(
-        coin, req.interval, launch_ms, interval_ms, fetch_candles_paginated
-    )
-    if req.limit > 0:
-        candle_data = candle_data[-req.limit:]
-    if not candle_data:
-        return {"error": "No candle data returned"}
-
+    candle_data, coin, err = await _backtest_candles(req)
+    if err:
+        return err
     result = await asyncio.to_thread(
-        run_backtest,
-        candle_data,
-        req.starting_balance,
-        req.size_usd,
-        req.leverage,
-        req.strategy,
-        req.fee_bps,
+        run_backtest, candle_data, req.starting_balance, req.size_usd, req.leverage,
+        req.strategy, req.fee_bps, req.slippage_bps, req.funding_apr, _risk_from(req),
     )
     result["meta"] = {
-        "coin":     coin,
-        "interval": req.interval,
-        "strategy": req.strategy,
-        "candles":  len(candle_data),
+        "coin": coin, "interval": req.interval, "strategy": req.strategy,
+        "candles": len(candle_data),
+        "costs": {"fee_bps": req.fee_bps, "slippage_bps": req.slippage_bps, "funding_apr": req.funding_apr},
+    }
+    return result
+
+
+@app.post("/backtest/walkforward")
+async def run_walkforward_endpoint(req: BacktestRequest) -> dict:
+    from backtest import run_walk_forward, STRATEGIES
+    if req.strategy not in STRATEGIES:
+        return {"error": f"Unknown strategy: {req.strategy}. Options: {', '.join(STRATEGIES)}"}
+    candle_data, coin, err = await _backtest_candles(req)
+    if err:
+        return err
+    result = await asyncio.to_thread(
+        run_walk_forward, candle_data, req.starting_balance, req.size_usd, req.leverage,
+        req.strategy, req.folds,
+        fee_bps=req.fee_bps, slippage_bps=req.slippage_bps, funding_apr=req.funding_apr, risk=_risk_from(req),
+    )
+    result["meta"] = {
+        "coin": coin, "interval": req.interval, "strategy": req.strategy,
+        "candles": len(candle_data), "folds": req.folds,
     }
     return result
 
