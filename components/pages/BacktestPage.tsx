@@ -24,49 +24,75 @@ interface Trade {
 }
 
 interface Stats {
-  total_trades:      number;
-  win_rate:          number;
-  profit_factor:     number;
-  max_drawdown:      number;
-  sharpe:            number;
-  sortino:           number;
-  net_pnl:           number;
-  return_pct:        number;
-  avg_win:           number;
-  avg_loss:          number;
-  expectancy:        number;
-  max_consec_losses: number;
-  best_trade:        number;
-  worst_trade:       number;
-  total_fees:        number;
-  long_trades:       number;
-  short_trades:      number;
-  exposure:          number;
+  total_trades:        number;
+  win_rate:            number;
+  profit_factor:       number;
+  max_drawdown:        number;
+  sharpe:              number;
+  sortino:             number;
+  net_pnl:             number;
+  return_pct:          number;
+  avg_win:             number;
+  avg_loss:            number;
+  expectancy:          number;
+  max_consec_losses:   number;
+  best_trade:          number;
+  worst_trade:         number;
+  total_fees:          number;
+  long_trades:         number;
+  short_trades:        number;
+  exposure:            number;
+  buy_hold_return_pct: number;
+  buy_hold_pnl:        number;
+  alpha_pct:           number;
+  total_funding:       number;
+  slippage_cost:       number;
+  halted:              boolean;
 }
 
+type Curve = { time: number; value: number }[];
+
 interface BacktestResult {
-  trades:        Trade[];
-  equity_curve:  { time: number; value: number }[];
-  stats:         Stats;
-  meta:          { coin: string; interval: string; strategy: string; candles: number };
+  trades:         Trade[];
+  equity_curve:   Curve;
+  buy_hold_curve: Curve;
+  stats:          Stats;
+  meta:           { coin: string; interval: string; strategy: string; candles: number };
+}
+
+interface WFFold {
+  fold: number; candles: number; return_pct: number; buy_hold_return_pct: number;
+  alpha_pct: number; sharpe: number; max_drawdown: number; trades: number; win_rate: number;
+}
+interface WalkForwardResult {
+  folds: WFFold[];
+  summary: {
+    folds: number; profitable_folds: number; beats_buy_hold_folds: number;
+    mean_return_pct: number; return_std_pct: number; mean_alpha_pct: number;
+    best_fold_pct: number; worst_fold_pct: number; consistency: number;
+  };
 }
 
 const mono = "var(--font-mono, 'IBM Plex Mono', monospace)";
 const sans = "var(--font-sans, Inter, sans-serif)";
+const GREEN = "#4ecf8a", RED = "#cf4e4e";
+
+const pct = (v: number) => `${v >= 0 ? "+" : ""}${v.toFixed(1)}%`;
+const gr  = (v: number) => (v >= 0 ? GREEN : RED);
 
 const STAT_LABELS: { key: keyof Stats; label: string; fmt: (v: number) => string; color?: (v: number) => string }[] = [
-  { key: "net_pnl",       label: "Net P&L",       fmt: (v) => `$${v >= 0 ? "+" : ""}${v.toFixed(2)}`, color: (v) => v >= 0 ? "#4ecf8a" : "#cf4e4e" },
-  { key: "return_pct",    label: "Return",        fmt: (v) => `${v >= 0 ? "+" : ""}${v.toFixed(1)}%`,  color: (v) => v >= 0 ? "#4ecf8a" : "#cf4e4e" },
-  { key: "win_rate",      label: "Win Rate",      fmt: (v) => `${v.toFixed(1)}%`,                       color: (v) => v >= 50 ? "#4ecf8a" : "#cf4e4e" },
-  { key: "profit_factor", label: "Profit Factor", fmt: (v) => v.toFixed(2),                             color: (v) => v >= 1 ? "#4ecf8a" : "#cf4e4e" },
-  { key: "sharpe",        label: "Sharpe",        fmt: (v) => v.toFixed(2),                             color: (v) => v >= 1 ? "#4ecf8a" : v >= 0 ? "#cfad4e" : "#cf4e4e" },
-  { key: "sortino",       label: "Sortino",       fmt: (v) => v.toFixed(2),                             color: (v) => v >= 1 ? "#4ecf8a" : v >= 0 ? "#cfad4e" : "#cf4e4e" },
-  { key: "max_drawdown",  label: "Max Drawdown",  fmt: (v) => `${v.toFixed(2)}%`,                       color: (v) => v < 10 ? "#4ecf8a" : v < 20 ? "#cfad4e" : "#cf4e4e" },
-  { key: "expectancy",    label: "Expectancy",    fmt: (v) => `$${v >= 0 ? "+" : ""}${v.toFixed(2)}`,  color: (v) => v >= 0 ? "#4ecf8a" : "#cf4e4e" },
-  { key: "avg_win",       label: "Avg Win",       fmt: (v) => `$${v.toFixed(2)}`,                       color: () => "#4ecf8a" },
-  { key: "avg_loss",      label: "Avg Loss",      fmt: (v) => `$${v.toFixed(2)}`,                       color: () => "#cf4e4e" },
-  { key: "exposure",      label: "Exposure",      fmt: (v) => `${v.toFixed(1)}%` },
-  { key: "total_trades",  label: "Total Trades",  fmt: (v) => String(v) },
+  { key: "net_pnl",             label: "Net P&L",       fmt: (v) => `$${v >= 0 ? "+" : ""}${v.toFixed(2)}`, color: gr },
+  { key: "return_pct",          label: "Return",        fmt: pct, color: gr },
+  { key: "buy_hold_return_pct", label: "Buy & Hold",    fmt: pct, color: gr },
+  { key: "alpha_pct",           label: "Alpha",         fmt: pct, color: gr },
+  { key: "win_rate",            label: "Win Rate",      fmt: (v) => `${v.toFixed(1)}%`, color: (v) => v >= 50 ? GREEN : RED },
+  { key: "profit_factor",       label: "Profit Factor", fmt: (v) => v.toFixed(2),       color: (v) => v >= 1 ? GREEN : RED },
+  { key: "sharpe",              label: "Sharpe",        fmt: (v) => v.toFixed(2),       color: (v) => v >= 1 ? GREEN : v >= 0 ? "#cfad4e" : RED },
+  { key: "sortino",             label: "Sortino",       fmt: (v) => v.toFixed(2),       color: (v) => v >= 1 ? GREEN : v >= 0 ? "#cfad4e" : RED },
+  { key: "max_drawdown",        label: "Max Drawdown",  fmt: (v) => `${v.toFixed(2)}%`, color: (v) => v < 10 ? GREEN : v < 20 ? "#cfad4e" : RED },
+  { key: "expectancy",          label: "Expectancy",    fmt: (v) => `$${v >= 0 ? "+" : ""}${v.toFixed(2)}`, color: gr },
+  { key: "exposure",            label: "Exposure",      fmt: (v) => `${v.toFixed(1)}%` },
+  { key: "total_trades",        label: "Total Trades",  fmt: (v) => String(v) },
 ];
 
 function fmtTime(unix: number): string {
@@ -75,13 +101,24 @@ function fmtTime(unix: number): string {
 
 export default function BacktestPage() {
   const [coin, setCoin]         = useState<Coin>("BTC");
-  const [interval, setInterval] = useState<Interval>("1h");
-  const [strategy, setStrategy] = useState<Strategy>("momentum");
+  const [interval, setInterval] = useState<Interval>("4h");
+  const [strategy, setStrategy] = useState<Strategy>("breakout");
   const [balance, setBalance]   = useState("10000");
   const [sizeUsd, setSizeUsd]   = useState("200");
   const [leverage, setLeverage] = useState("5");
+  // cost model
+  const [slip, setSlip]         = useState("2");    // bps/side
+  const [funding, setFunding]   = useState("10");   // % APR
+  // risk layer (all % ; 0 = off)
+  const [stopLoss, setStopLoss] = useState("0");
+  const [takeProfit, setTP]     = useState("0");
+  const [killDD, setKillDD]     = useState("0");
+  const [sizePct, setSizePct]   = useState("0");
+
   const [loading, setLoading]   = useState(false);
+  const [wfLoading, setWfLoading] = useState(false);
   const [result, setResult]     = useState<BacktestResult | null>(null);
+  const [wf, setWf]             = useState<WalkForwardResult | null>(null);
   const [error, setError]       = useState<string | null>(null);
 
   const chartRef   = useRef<HTMLDivElement>(null);
@@ -90,46 +127,57 @@ export default function BacktestPage() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const seriesInst = useRef<any>(null);
 
-  async function runBacktest() {
-    setLoading(true);
-    setError(null);
-    setResult(null);
-    try {
-      const res = await fetch("http://localhost:8000/backtest", {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          coin,
-          interval,
-          strategy,
-          starting_balance: parseFloat(balance) || 10000,
-          size_usd:         parseFloat(sizeUsd) || 200,
-          leverage:         parseInt(leverage) || 5,
-        }),
-      });
-      if (res.status === 404) {
-        setError("Bridge is running old code — restart server/main.py to load the /backtest endpoint");
-        return;
-      }
-      if (!res.ok) {
-        setError(`Backtest request failed (HTTP ${res.status})`);
-        return;
-      }
-      const data = await res.json();
-      if (data?.error) { setError(data.error); return; }
-      if (!data?.meta || !data?.stats) {
-        setError("Unexpected response from bridge — restart server/main.py and retry");
-        return;
-      }
-      setResult(data as BacktestResult);
-    } catch (e) {
-      setError("Bridge server offline — start server/main.py first");
-    } finally {
-      setLoading(false);
-    }
+  function reqBody() {
+    return {
+      coin, interval, strategy,
+      starting_balance: parseFloat(balance) || 10000,
+      size_usd:         parseFloat(sizeUsd) || 200,
+      leverage:         parseInt(leverage) || 5,
+      slippage_bps:     parseFloat(slip) || 0,
+      funding_apr:      (parseFloat(funding) || 0) / 100,
+      stop_loss_pct:    (parseFloat(stopLoss) || 0) / 100,
+      take_profit_pct:  (parseFloat(takeProfit) || 0) / 100,
+      max_drawdown_pct: (parseFloat(killDD) || 0) / 100,
+      max_position_pct: (parseFloat(sizePct) || 0) / 100,
+    };
   }
 
-  // Init equity chart
+  async function runBacktest() {
+    setLoading(true); setError(null); setResult(null); setWf(null);
+    try {
+      const res = await fetch("http://localhost:8000/backtest", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(reqBody()),
+      });
+      if (res.status === 404) { setError("Bridge is running old code — restart server/main.py"); return; }
+      if (!res.ok) { setError(`Backtest failed (HTTP ${res.status})`); return; }
+      const data = await res.json();
+      if (data?.error) { setError(data.error); return; }
+      if (!data?.meta || !data?.stats) { setError("Unexpected response — restart server/main.py"); return; }
+      setResult(data as BacktestResult);
+    } catch {
+      setError("Bridge server offline — start server/main.py first");
+    } finally { setLoading(false); }
+  }
+
+  async function runWalkForward() {
+    setWfLoading(true); setError(null); setWf(null);
+    try {
+      const res = await fetch("http://localhost:8000/backtest/walkforward", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...reqBody(), folds: 5 }),
+      });
+      if (res.status === 404) { setError("Bridge is running old code — restart server/main.py to load /backtest/walkforward"); return; }
+      if (!res.ok) { setError(`Walk-forward failed (HTTP ${res.status})`); return; }
+      const data = await res.json();
+      if (data?.error) { setError(data.error); return; }
+      setWf(data as WalkForwardResult);
+    } catch {
+      setError("Bridge server offline — start server/main.py first");
+    } finally { setWfLoading(false); }
+  }
+
+  // Equity chart + buy-and-hold overlay
   useEffect(() => {
     if (!result || !chartRef.current) return;
     let destroyed = false;
@@ -141,11 +189,7 @@ export default function BacktestPage() {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const { createChart, LineSeries, createSeriesMarkers } = lc as any;
 
-      if (chartInst.current) {
-        chartInst.current.remove();
-        chartInst.current = null;
-        seriesInst.current = null;
-      }
+      if (chartInst.current) { chartInst.current.remove(); chartInst.current = null; seriesInst.current = null; }
 
       const chart = createChart(chartRef.current, {
         layout:   { background: { color: "#0a0a0a" }, textColor: "#555" },
@@ -160,17 +204,22 @@ export default function BacktestPage() {
         height: chartRef.current.clientHeight,
       });
 
-      const series = chart.addSeries(LineSeries, {
-        color:     snapshot.stats.net_pnl >= 0 ? "#3aaa72" : "#aa3a3a",
-        lineWidth: 2,
-      });
+      // buy & hold reference (dashed grey) drawn first so the strategy sits on top
+      if (snapshot.buy_hold_curve?.length) {
+        const bh = chart.addSeries(LineSeries, {
+          color: "rgba(130,130,130,0.55)", lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false,
+        });
+        bh.setData(snapshot.buy_hold_curve);
+      }
 
+      const series = chart.addSeries(LineSeries, {
+        color: snapshot.stats.net_pnl >= 0 ? "#3aaa72" : "#aa3a3a", lineWidth: 2,
+      });
       series.setData(snapshot.equity_curve);
 
-      // Trade markers on the equity curve: green ↑ for wins, red ↓ for losses
       const markers = snapshot.trades
         .map((t) => ({
-          time:     t.close_time,
+          time: t.close_time,
           position: t.pnl_usd >= 0 ? "aboveBar" : "belowBar",
           color:    t.pnl_usd >= 0 ? "#3aaa72" : "#aa3a3a",
           shape:    t.pnl_usd >= 0 ? "arrowUp" : "arrowDown",
@@ -180,175 +229,136 @@ export default function BacktestPage() {
       if (markers.length > 0) createSeriesMarkers(series, markers);
 
       chart.timeScale().fitContent();
-
-      chartInst.current  = chart;
+      chartInst.current = chart;
       seriesInst.current = series;
 
       const ro = new ResizeObserver(() => {
         if (chartRef.current && chartInst.current) {
-          chartInst.current.applyOptions({
-            width:  chartRef.current.clientWidth,
-            height: chartRef.current.clientHeight,
-          });
+          chartInst.current.applyOptions({ width: chartRef.current.clientWidth, height: chartRef.current.clientHeight });
         }
       });
       ro.observe(chartRef.current);
     }
-
     init();
     return () => { destroyed = true; };
   }, [result]);
 
-  // Cleanup on unmount
-  useEffect(() => () => {
-    if (chartInst.current) { chartInst.current.remove(); chartInst.current = null; }
-  }, []);
+  useEffect(() => () => { if (chartInst.current) { chartInst.current.remove(); chartInst.current = null; } }, []);
 
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column", padding: 12, gap: 12, overflow: "hidden" }}>
 
       {/* Controls */}
-      <div className="panel" style={{ padding: "10px 14px", display: "flex", alignItems: "center", gap: 16, flexShrink: 0, flexWrap: "wrap" }}>
-
-        {/* Coin */}
+      <div className="panel" style={{ padding: "10px 14px", display: "flex", alignItems: "center", gap: 14, flexShrink: 0, flexWrap: "wrap" }}>
         <ControlGroup label="Coin">
-          {(["BTC", "ETH", "SOL"] as Coin[]).map((c) => (
-            <Chip key={c} active={coin === c} onClick={() => setCoin(c)}>{c}</Chip>
-          ))}
+          {(["BTC", "ETH", "SOL"] as Coin[]).map((c) => <Chip key={c} active={coin === c} onClick={() => setCoin(c)}>{c}</Chip>)}
         </ControlGroup>
-
         <Sep />
-
-        {/* Interval */}
         <ControlGroup label="Interval">
-          {(["15m", "1h", "4h", "1d"] as Interval[]).map((iv) => (
-            <Chip key={iv} active={interval === iv} onClick={() => setInterval(iv)}>{iv}</Chip>
-          ))}
+          {(["15m", "1h", "4h", "1d"] as Interval[]).map((iv) => <Chip key={iv} active={interval === iv} onClick={() => setInterval(iv)}>{iv}</Chip>)}
         </ControlGroup>
-
         <Sep />
-
-        {/* Strategy */}
         <ControlGroup label="Strategy">
-          {STRATEGIES.map((s) => (
-            <Chip key={s} active={strategy === s} onClick={() => setStrategy(s)}>{STRAT_LABEL[s]}</Chip>
-          ))}
+          {STRATEGIES.map((s) => <Chip key={s} active={strategy === s} onClick={() => setStrategy(s)}>{STRAT_LABEL[s]}</Chip>)}
         </ControlGroup>
+        <Sep />
+        <ControlGroup label="Balance"><NumInput value={balance} onChange={setBalance} prefix="$" /></ControlGroup>
+        <ControlGroup label="Size/trade"><NumInput value={sizeUsd} onChange={setSizeUsd} prefix="$" /></ControlGroup>
+        <ControlGroup label="Leverage"><NumInput value={leverage} onChange={setLeverage} suffix="×" width={44} /></ControlGroup>
 
         <Sep />
+        {/* Cost model */}
+        <ControlGroup label="Slip bps"><NumInput value={slip} onChange={setSlip} width={40} /></ControlGroup>
+        <ControlGroup label="Funding %"><NumInput value={funding} onChange={setFunding} width={40} /></ControlGroup>
 
-        {/* Numeric inputs */}
-        <ControlGroup label="Balance">
-          <NumInput value={balance} onChange={setBalance} prefix="$" />
-        </ControlGroup>
-        <ControlGroup label="Size/trade">
-          <NumInput value={sizeUsd} onChange={setSizeUsd} prefix="$" />
-        </ControlGroup>
-        <ControlGroup label="Leverage">
-          <NumInput value={leverage} onChange={setLeverage} suffix="×" width={48} />
-        </ControlGroup>
+        <Sep />
+        {/* Risk layer */}
+        <ControlGroup label="Stop %"><NumInput value={stopLoss} onChange={setStopLoss} width={40} /></ControlGroup>
+        <ControlGroup label="TP %"><NumInput value={takeProfit} onChange={setTP} width={40} /></ControlGroup>
+        <ControlGroup label="Kill DD %"><NumInput value={killDD} onChange={setKillDD} width={40} /></ControlGroup>
+        <ControlGroup label="Size %eq"><NumInput value={sizePct} onChange={setSizePct} width={40} /></ControlGroup>
 
         <div style={{ flex: 1 }} />
 
-        <button
-          onClick={runBacktest}
-          disabled={loading}
-          style={{
-            fontFamily: mono,
-            fontSize: 11,
-            fontWeight: 600,
-            padding: "6px 18px",
-            background: loading ? "#111" : "#101e30",
-            border: "1px solid #1c3050",
-            borderRadius: 3,
-            color: loading ? "#333" : "#4e8ecf",
-            cursor: loading ? "not-allowed" : "pointer",
-          }}
-        >
+        <button onClick={runWalkForward} disabled={wfLoading || loading}
+          title="Run the strategy across 5 sequential out-of-sample folds"
+          style={btnStyle(wfLoading, "#cfad4e", "#2a2410", "#3a3015")}>
+          {wfLoading ? "..." : "WALK-FWD"}
+        </button>
+        <button onClick={runBacktest} disabled={loading}
+          style={btnStyle(loading, "#4e8ecf", "#101e30", "#1c3050")}>
           {loading ? "running..." : "RUN BACKTEST"}
         </button>
       </div>
 
       {error && (
-        <div style={{ fontFamily: mono, fontSize: 11, color: "#cf4e4e", padding: "6px 14px", background: "#1a0a0a", borderRadius: 3 }}>
+        <div style={{ fontFamily: mono, fontSize: 11, color: RED, padding: "6px 14px", background: "#1a0a0a", borderRadius: 3, flexShrink: 0 }}>
           {error}
         </div>
       )}
 
-      {/* Results area */}
+      {/* Walk-forward strip */}
+      {wf && (
+        <div className="panel" style={{ padding: "8px 14px", flexShrink: 0 }}>
+          <div style={{ fontFamily: mono, fontSize: 9, color: "#444", marginBottom: 7, letterSpacing: "0.08em" }}>
+            WALK-FORWARD · {wf.summary.folds} FOLDS · <span style={{ color: "#888" }}>{wf.summary.profitable_folds} profitable</span> · beats B&amp;H {wf.summary.beats_buy_hold_folds}/{wf.summary.folds} · consistency <span style={{ color: gr(wf.summary.consistency - 0.5) }}>{wf.summary.consistency}</span> · mean alpha <span style={{ color: gr(wf.summary.mean_alpha_pct) }}>{pct(wf.summary.mean_alpha_pct)}</span>
+          </div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {wf.folds.map((f) => (
+              <div key={f.fold} style={{ background: "#0c0c0c", border: "1px solid #1a1a1a", borderRadius: 3, padding: "4px 8px", minWidth: 86 }}>
+                <div style={{ fontFamily: mono, fontSize: 8, color: "#555" }}>FOLD {f.fold} · {f.trades}t</div>
+                <div style={{ fontFamily: sans, fontWeight: 700, fontSize: 13, color: gr(f.return_pct) }}>{pct(f.return_pct)}</div>
+                <div style={{ fontFamily: mono, fontSize: 8, color: "#666" }}>α {pct(f.alpha_pct)} · DD {f.max_drawdown.toFixed(1)}%</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Results */}
       {result ? (
         <div style={{ flex: 1, display: "flex", gap: 12, minHeight: 0 }}>
-
-          {/* Left: stats + trade log */}
           <div style={{ width: 280, display: "flex", flexDirection: "column", gap: 10, flexShrink: 0 }}>
-
-            {/* Stats grid */}
             <div className="panel" style={{ padding: "10px 14px" }}>
               <div style={{ fontFamily: mono, fontSize: 9, color: "#444", marginBottom: 10, letterSpacing: "0.08em" }}>
                 {result.meta.strategy.toUpperCase()} · {result.meta.coin} {result.meta.interval.toUpperCase()} · {result.meta.candles} candles
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 14px" }}>
                 {STAT_LABELS.map(({ key, label, fmt, color }) => {
-                  const val = result.stats[key];
+                  const val = result.stats[key] as number;
                   return (
                     <div key={key}>
                       <div style={{ fontFamily: mono, fontSize: 9, color: "#444", marginBottom: 2 }}>{label}</div>
-                      <div style={{
-                        fontFamily: sans,
-                        fontWeight: 700,
-                        fontSize: 14,
-                        color: color ? color(val) : "#e8e8e8",
-                      }}>
-                        {fmt(val)}
-                      </div>
+                      <div style={{ fontFamily: sans, fontWeight: 700, fontSize: 14, color: color ? color(val) : "#e8e8e8" }}>{fmt(val)}</div>
                     </div>
                   );
                 })}
               </div>
-
-              {/* secondary stats row */}
               <div style={{ marginTop: 10, paddingTop: 8, borderTop: "1px solid #141414", display: "flex", flexWrap: "wrap", gap: "4px 12px", fontFamily: mono, fontSize: 9, color: "#666" }}>
                 <span><span style={{ color: "#3aaa72" }}>{result.stats.long_trades}L</span> / <span style={{ color: "#aa3a3a" }}>{result.stats.short_trades}S</span></span>
-                <span>best <span style={{ color: "#4ecf8a" }}>+${result.stats.best_trade.toFixed(0)}</span></span>
-                <span>worst <span style={{ color: "#cf4e4e" }}>${result.stats.worst_trade.toFixed(0)}</span></span>
-                <span>max consec L {result.stats.max_consec_losses}</span>
                 <span>fees ${result.stats.total_fees.toFixed(0)}</span>
+                <span>funding ${result.stats.total_funding.toFixed(0)}</span>
+                <span>slip ${result.stats.slippage_cost.toFixed(0)}</span>
+                <span>maxL {result.stats.max_consec_losses}</span>
+                {result.stats.halted && <span style={{ color: RED, fontWeight: 700 }}>⚠ KILL-SWITCH FIRED</span>}
               </div>
             </div>
 
-            {/* Trade log */}
             <div className="panel" style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
-              <div style={{ fontFamily: mono, fontSize: 9, color: "#444", padding: "8px 12px", borderBottom: "1px solid #141414", letterSpacing: "0.08em" }}>
-                TRADE LOG
-              </div>
+              <div style={{ fontFamily: mono, fontSize: 9, color: "#444", padding: "8px 12px", borderBottom: "1px solid #141414", letterSpacing: "0.08em" }}>TRADE LOG</div>
               <div style={{ flex: 1, overflowY: "auto" }}>
                 {result.trades.length === 0 ? (
                   <div style={{ padding: 12, fontFamily: mono, fontSize: 10, color: "#333" }}>No trades generated</div>
                 ) : (
                   result.trades.slice().reverse().map((t, i) => (
-                    <div
-                      key={i}
-                      style={{
-                        padding: "6px 12px",
-                        borderBottom: "1px solid #0e0e0e",
-                        display: "flex",
-                        justifyContent: "space-between",
-                        alignItems: "center",
-                      }}
-                    >
+                    <div key={i} style={{ padding: "6px 12px", borderBottom: "1px solid #0e0e0e", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                       <div>
                         <div style={{ fontFamily: mono, fontSize: 9, color: "#555", marginBottom: 2 }}>{fmtTime(t.open_time)}</div>
                         <div style={{ fontFamily: mono, fontSize: 10, color: "#e8e8e8" }}>
                           {t.direction.toUpperCase()} · ${t.entry_px.toLocaleString()} → ${t.exit_px.toLocaleString()}
                         </div>
                       </div>
-                      <div style={{
-                        fontFamily: sans,
-                        fontWeight: 700,
-                        fontSize: 12,
-                        color: t.pnl_usd >= 0 ? "#4ecf8a" : "#cf4e4e",
-                        textAlign: "right",
-                      }}>
+                      <div style={{ fontFamily: sans, fontWeight: 700, fontSize: 12, color: t.pnl_usd >= 0 ? GREEN : RED, textAlign: "right" }}>
                         {t.pnl_usd >= 0 ? "+" : ""}{t.pnl_usd.toFixed(2)}
                         <div style={{ fontFamily: mono, fontSize: 9, color: t.pnl_usd >= 0 ? "#3aaa72" : "#aa3a3a" }}>
                           {t.pnl_pct >= 0 ? "+" : ""}{t.pnl_pct.toFixed(2)}%
@@ -361,36 +371,21 @@ export default function BacktestPage() {
             </div>
           </div>
 
-          {/* Right: equity curve */}
           <div className="panel" style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
-            <div style={{ fontFamily: mono, fontSize: 9, color: "#444", padding: "8px 12px", borderBottom: "1px solid #141414", letterSpacing: "0.08em" }}>
-              EQUITY CURVE
+            <div style={{ fontFamily: mono, fontSize: 9, color: "#444", padding: "8px 12px", borderBottom: "1px solid #141414", letterSpacing: "0.08em", display: "flex", justifyContent: "space-between" }}>
+              <span>EQUITY CURVE</span>
+              <span style={{ color: "#555" }}>strategy <span style={{ color: "#3aaa72" }}>━</span>  ·  buy &amp; hold <span style={{ color: "#888" }}>┄</span></span>
             </div>
             <div ref={chartRef} style={{ flex: 1, minHeight: 0 }} />
           </div>
         </div>
       ) : !loading ? (
-        <div style={{
-          flex: 1,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          fontFamily: mono,
-          fontSize: 11,
-          color: "#2a2a2a",
-        }}>
-          configure parameters above and press RUN BACKTEST
+        <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: mono, fontSize: 11, color: "#2a2a2a", textAlign: "center", lineHeight: 1.8 }}>
+          configure parameters above and press RUN BACKTEST<br />
+          <span style={{ fontSize: 9, color: "#222" }}>costs (slippage + funding) are on by default · set risk %s to enable stop / kill-switch / sizing</span>
         </div>
       ) : (
-        <div style={{
-          flex: 1,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          fontFamily: mono,
-          fontSize: 11,
-          color: "#333",
-        }}>
+        <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: mono, fontSize: 11, color: "#333" }}>
           fetching candles + running backtest...
         </div>
       )}
@@ -400,71 +395,49 @@ export default function BacktestPage() {
 
 // ─── small reusable UI atoms ──────────────────────────────────────────────────
 
+function btnStyle(disabled: boolean, color: string, bg: string, border: string): React.CSSProperties {
+  return {
+    fontFamily: mono, fontSize: 11, fontWeight: 600, padding: "6px 16px",
+    background: disabled ? "#111" : bg, border: `1px solid ${disabled ? "#1a1a1a" : border}`,
+    borderRadius: 3, color: disabled ? "#333" : color, cursor: disabled ? "not-allowed" : "pointer",
+  };
+}
+
 function ControlGroup({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-      <div style={{ fontFamily: "var(--font-mono,'IBM Plex Mono',monospace)", fontSize: 8, color: "#444", letterSpacing: "0.1em" }}>
-        {label.toUpperCase()}
-      </div>
-      <div style={{ display: "flex", gap: 4, alignItems: "center", flexWrap: "wrap" }}>
-        {children}
-      </div>
+      <div style={{ fontFamily: mono, fontSize: 8, color: "#444", letterSpacing: "0.1em" }}>{label.toUpperCase()}</div>
+      <div style={{ display: "flex", gap: 4, alignItems: "center", flexWrap: "wrap" }}>{children}</div>
     </div>
   );
 }
 
 function Chip({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
   return (
-    <button
-      onClick={onClick}
-      style={{
-        fontFamily: "var(--font-mono,'IBM Plex Mono',monospace)",
-        fontSize: 10,
-        padding: "3px 8px",
-        background: active ? "#101e30" : "none",
-        border: active ? "1px solid #1c3050" : "1px solid transparent",
-        borderRadius: 2,
-        color: active ? "#4e8ecf" : "#555",
-        cursor: "pointer",
-      }}
-    >
+    <button onClick={onClick} style={{
+      fontFamily: mono, fontSize: 10, padding: "3px 8px",
+      background: active ? "#101e30" : "none",
+      border: active ? "1px solid #1c3050" : "1px solid transparent",
+      borderRadius: 2, color: active ? "#4e8ecf" : "#555", cursor: "pointer",
+    }}>
       {children}
     </button>
   );
 }
 
-function Sep() {
-  return <div style={{ width: 1, height: 28, background: "#1a1a1a" }} />;
-}
+function Sep() { return <div style={{ width: 1, height: 28, background: "#1a1a1a" }} />; }
 
-function NumInput({
-  value, onChange, prefix, suffix, width = 72,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  prefix?: string;
-  suffix?: string;
-  width?: number;
+function NumInput({ value, onChange, prefix, suffix, width = 72 }: {
+  value: string; onChange: (v: string) => void; prefix?: string; suffix?: string; width?: number;
 }) {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 2 }}>
-      {prefix && <span style={{ fontFamily: "var(--font-mono,'IBM Plex Mono',monospace)", fontSize: 10, color: "#444" }}>{prefix}</span>}
-      <input
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        style={{
-          width,
-          fontFamily: "var(--font-mono,'IBM Plex Mono',monospace)",
-          fontSize: 11,
-          background: "#0a0a0a",
-          border: "1px solid #1c1c1c",
-          borderRadius: 2,
-          color: "#e8e8e8",
-          padding: "3px 6px",
-          outline: "none",
-        }}
-      />
-      {suffix && <span style={{ fontFamily: "var(--font-mono,'IBM Plex Mono',monospace)", fontSize: 10, color: "#444" }}>{suffix}</span>}
+      {prefix && <span style={{ fontFamily: mono, fontSize: 10, color: "#444" }}>{prefix}</span>}
+      <input value={value} onChange={(e) => onChange(e.target.value)} style={{
+        width, fontFamily: mono, fontSize: 11, background: "#0a0a0a", border: "1px solid #1c1c1c",
+        borderRadius: 2, color: "#e8e8e8", padding: "3px 6px", outline: "none",
+      }} />
+      {suffix && <span style={{ fontFamily: mono, fontSize: 10, color: "#444" }}>{suffix}</span>}
     </div>
   );
 }
