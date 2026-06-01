@@ -3,6 +3,7 @@ MEGALPHA Journal — SQLite persistence for trade journal entries.
 DB file: server/journal.db  (gitignored)
 Schema : entries(id, date, title, body, created_at, updated_at)
 """
+import json as _json
 import sqlite3
 import time
 from pathlib import Path
@@ -14,9 +15,6 @@ def _conn() -> sqlite3.Connection:  # type: ignore[return]
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
-
-
-import json as _json
 
 
 def init_db() -> None:
@@ -205,13 +203,13 @@ def get_signal_stats() -> dict:
             "SELECT COUNT(*) FROM signals WHERE signal IN ('LONG','SHORT')"
         ).fetchone()[0]
         wins = db.execute(
-            "SELECT COUNT(*) FROM signals WHERE outcome='WIN'"
+            "SELECT COUNT(*) FROM signals WHERE outcome='WIN' AND signal IN ('LONG','SHORT')"
         ).fetchone()[0]
         losses = db.execute(
-            "SELECT COUNT(*) FROM signals WHERE outcome='LOSS'"
+            "SELECT COUNT(*) FROM signals WHERE outcome='LOSS' AND signal IN ('LONG','SHORT')"
         ).fetchone()[0]
         pending = db.execute(
-            "SELECT COUNT(*) FROM signals WHERE outcome='PENDING'"
+            "SELECT COUNT(*) FROM signals WHERE outcome='PENDING' AND signal IN ('LONG','SHORT')"
         ).fetchone()[0]
         avg_win_row = db.execute(
             "SELECT AVG(pnl_pct) FROM signals WHERE outcome='WIN'"
