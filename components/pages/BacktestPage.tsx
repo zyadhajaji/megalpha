@@ -1,14 +1,17 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { BRIDGE_HTTP } from "@/lib/bridge";
 
 type Coin      = "BTC" | "ETH" | "SOL";
 type Interval  = "15m" | "1h" | "4h" | "1d";
-type Strategy  = "momentum" | "breakout" | "mean_reversion" | "ema_cross" | "macd" | "bollinger";
+type Strategy  = "momentum" | "breakout" | "mean_reversion" | "ema_cross" | "macd" | "bollinger" | "agent";
 
-const STRATEGIES: Strategy[] = ["momentum", "breakout", "mean_reversion", "ema_cross", "macd", "bollinger"];
+interface SavedStrategy { name: string; slug: string; }
+
+const STRATEGIES: Strategy[] = ["agent", "momentum", "breakout", "mean_reversion", "ema_cross", "macd", "bollinger"];
 const STRAT_LABEL: Record<Strategy, string> = {
-  momentum: "momentum", breakout: "breakout", mean_reversion: "mean rev",
+  agent: "🤖 RL bot", momentum: "momentum", breakout: "breakout", mean_reversion: "mean rev",
   ema_cross: "ema cross", macd: "macd", bollinger: "bollinger",
 };
 
@@ -100,9 +103,9 @@ function fmtTime(unix: number): string {
 }
 
 export default function BacktestPage() {
-  const [coin, setCoin]         = useState<Coin>("BTC");
+  const [coin, setCoin]         = useState<Coin>("ETH");
   const [interval, setInterval] = useState<Interval>("4h");
-  const [strategy, setStrategy] = useState<Strategy>("breakout");
+  const [strategy, setStrategy] = useState<Strategy>("agent");
   const [balance, setBalance]   = useState("10000");
   const [sizeUsd, setSizeUsd]   = useState("200");
   const [leverage, setLeverage] = useState("5");
@@ -121,11 +124,78 @@ export default function BacktestPage() {
   const [wf, setWf]             = useState<WalkForwardResult | null>(null);
   const [error, setError]       = useState<string | null>(null);
 
+  // strategy save / load
+  const [saved, setSaved]           = useState<SavedStrategy[]>([]);
+  const [showSave, setShowSave]     = useState(false);
+  const [saveName, setSaveName]     = useState("");
+  const [saveMsg, setSaveMsg]       = useState<string | null>(null);
+
   const chartRef   = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const chartInst  = useRef<any>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const seriesInst = useRef<any>(null);
+
+  // ── strategy persistence ───────────────────────────────────────────────────
+
+  const fetchSaved = useCallback(async () => {
+    try {
+      const r = await fetch(`${BRIDGE_HTTP}/strategy/list`);
+      if (r.ok) setSaved(await r.json());
+    } catch { /* server offline */ }
+  }, []);
+
+  useEffect(() => { fetchSaved(); }, [fetchSaved]);
+
+  async function saveStrategy() {
+    const name = saveName.trim();
+    if (!name) return;
+    setSaveMsg(null);
+    try {
+      const r = await fetch(`${BRIDGE_HTTP}/strategy/save`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, config: reqBody() }),
+      });
+      const d = await r.json();
+      if (d.ok) {
+        setSaveMsg(`Saved "${name}"`);
+        setShowSave(false);
+        setSaveName("");
+        await fetchSaved();
+      } else {
+        setSaveMsg(d.error ?? "Save failed");
+      }
+    } catch { setSaveMsg("Bridge offline"); }
+  }
+
+  async function loadStrategy(slug: string) {
+    if (!slug) return;
+    try {
+      const r = await fetch(`${BRIDGE_HTTP}/strategy/${slug}`);
+      const d = await r.json();
+      if (!d.ok || !d.config) return;
+      const c = d.config;
+      if (c.coin)     setCoin(c.coin as Coin);
+      if (c.interval) setInterval(c.interval as Interval);
+      if (c.strategy) setStrategy(c.strategy as Strategy);
+      if (c.starting_balance != null) setBalance(String(c.starting_balance));
+      if (c.size_usd  != null) setSizeUsd(String(c.size_usd));
+      if (c.leverage  != null) setLeverage(String(c.leverage));
+      if (c.slippage_bps   != null) setSlip(String(c.slippage_bps));
+      if (c.funding_apr    != null) setFunding(String((c.funding_apr * 100).toFixed(2)));
+      if (c.stop_loss_pct  != null) setStopLoss(String((c.stop_loss_pct * 100).toFixed(2)));
+      if (c.take_profit_pct   != null) setTP(String((c.take_profit_pct * 100).toFixed(2)));
+      if (c.max_drawdown_pct  != null) setKillDD(String((c.max_drawdown_pct * 100).toFixed(2)));
+      if (c.max_position_pct  != null) setSizePct(String((c.max_position_pct * 100).toFixed(2)));
+    } catch { /* server offline */ }
+  }
+
+  async function deleteStrategy(slug: string) {
+    try {
+      await fetch(`${BRIDGE_HTTP}/strategy/${slug}`, { method: "DELETE" });
+      await fetchSaved();
+    } catch { /* ignore */ }
+  }
 
   function reqBody() {
     return {
@@ -145,7 +215,8 @@ export default function BacktestPage() {
   async function runBacktest() {
     setLoading(true); setError(null); setResult(null); setWf(null);
     try {
-      const res = await fetch("http://localhost:8000/backtest", {
+      const url = strategy === "agent" ? `${BRIDGE_HTTP}/backtest/agent` : `${BRIDGE_HTTP}/backtest`;
+      const res = await fetch(url, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(reqBody()),
       });
@@ -163,7 +234,7 @@ export default function BacktestPage() {
   async function runWalkForward() {
     setWfLoading(true); setError(null); setWf(null);
     try {
-      const res = await fetch("http://localhost:8000/backtest/walkforward", {
+      const res = await fetch(`${BRIDGE_HTTP}/backtest/walkforward`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...reqBody(), folds: 5 }),
       });
@@ -280,9 +351,25 @@ export default function BacktestPage() {
 
         <div style={{ flex: 1 }} />
 
-        <button onClick={runWalkForward} disabled={wfLoading || loading}
-          title="Run the strategy across 5 sequential out-of-sample folds"
-          style={btnStyle(wfLoading, "#cfad4e", "#2a2410", "#3a3015")}>
+        {/* strategy save / load */}
+        {saved.length > 0 && (
+          <select
+            onChange={(e) => { loadStrategy(e.target.value); (e.target as HTMLSelectElement).value = ""; }}
+            defaultValue=""
+            style={{ fontFamily: mono, fontSize: 10, background: "#0a0a0a", border: "1px solid #1c1c1c", borderRadius: 2, color: "#888", padding: "4px 6px", cursor: "pointer" }}
+          >
+            <option value="">LOAD ▾</option>
+            {saved.map((s) => <option key={s.slug} value={s.slug}>{s.name}</option>)}
+          </select>
+        )}
+        <button onClick={() => { setSaveName(""); setSaveMsg(null); setShowSave(true); }}
+          style={btnStyle(false, "#3aaa72", "#071a0e", "#0e3320")}>
+          SAVE
+        </button>
+
+        <button onClick={runWalkForward} disabled={wfLoading || loading || strategy === "agent"}
+          title={strategy === "agent" ? "Walk-forward is for rule strategies; the bot is a single trained model" : "Run the strategy across 5 sequential out-of-sample folds"}
+          style={btnStyle(wfLoading || strategy === "agent", "#cfad4e", "#2a2410", "#3a3015")}>
           {wfLoading ? "..." : "WALK-FWD"}
         </button>
         <button onClick={runBacktest} disabled={loading}
@@ -320,9 +407,14 @@ export default function BacktestPage() {
         <div style={{ flex: 1, display: "flex", gap: 12, minHeight: 0 }}>
           <div style={{ width: 280, display: "flex", flexDirection: "column", gap: 10, flexShrink: 0 }}>
             <div className="panel" style={{ padding: "10px 14px" }}>
-              <div style={{ fontFamily: mono, fontSize: 9, color: "#444", marginBottom: 10, letterSpacing: "0.08em" }}>
+              <div style={{ fontFamily: mono, fontSize: 9, color: "#444", marginBottom: result.meta.strategy === "agent" ? 4 : 10, letterSpacing: "0.08em" }}>
                 {result.meta.strategy.toUpperCase()} · {result.meta.coin} {result.meta.interval.toUpperCase()} · {result.meta.candles} candles
               </div>
+              {result.meta.strategy === "agent" && (
+                <div style={{ fontFamily: mono, fontSize: 8, color: "#6a5a2a", marginBottom: 10 }}>
+                  trained on older 80% (in-sample) · recent 20% is out-of-sample
+                </div>
+              )}
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 14px" }}>
                 {STAT_LABELS.map(({ key, label, fmt, color }) => {
                   const val = result.stats[key] as number;
@@ -387,6 +479,48 @@ export default function BacktestPage() {
       ) : (
         <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: mono, fontSize: 11, color: "#333" }}>
           fetching candles + running backtest...
+        </div>
+      )}
+
+      {/* save-name modal */}
+      {showSave && (
+        <div style={{
+          position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)",
+          display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100,
+        }}>
+          <div style={{ background: "#0c0c0c", border: "1px solid #1c1c1c", borderRadius: 4, padding: 24, width: 340, display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ fontFamily: mono, fontSize: 10, color: "#444", letterSpacing: "0.1em" }}>SAVE STRATEGY</div>
+            <input
+              autoFocus
+              value={saveName}
+              onChange={(e) => setSaveName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") saveStrategy(); if (e.key === "Escape") setShowSave(false); }}
+              placeholder="strategy name"
+              style={{ fontFamily: mono, fontSize: 12, background: "#070707", border: "1px solid #1c1c1c", borderRadius: 2, color: "#e8e8e8", padding: "6px 10px", outline: "none" }}
+            />
+            {saveMsg && <div style={{ fontFamily: mono, fontSize: 10, color: saveMsg.startsWith("Saved") ? GREEN : RED }}>{saveMsg}</div>}
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <button onClick={() => setShowSave(false)} style={btnStyle(false, "#888", "#111", "#1c1c1c")}>CANCEL</button>
+              <button onClick={saveStrategy} disabled={!saveName.trim()} style={btnStyle(!saveName.trim(), "#3aaa72", "#071a0e", "#0e3320")}>SAVE</button>
+            </div>
+            {saved.length > 0 && (
+              <div style={{ borderTop: "1px solid #141414", paddingTop: 10 }}>
+                <div style={{ fontFamily: mono, fontSize: 9, color: "#333", marginBottom: 6 }}>SAVED STRATEGIES</div>
+                {saved.map((s) => (
+                  <div key={s.slug} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "3px 0" }}>
+                    <span style={{ fontFamily: mono, fontSize: 10, color: "#888" }}>{s.name}</span>
+                    <button onClick={() => deleteStrategy(s.slug)} style={{ fontFamily: mono, fontSize: 9, background: "none", border: "none", color: "#aa3a3a", cursor: "pointer", padding: "2px 4px" }}>✕</button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {saveMsg && !showSave && (
+        <div style={{ position: "fixed", bottom: 20, right: 20, fontFamily: mono, fontSize: 11, color: GREEN, background: "#071a0e", border: "1px solid #0e3320", borderRadius: 3, padding: "6px 14px", zIndex: 99 }}>
+          {saveMsg}
         </div>
       )}
     </div>

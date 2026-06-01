@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
-import type { Candle } from "@/lib/types";
+import type { Candle, AISignal } from "@/lib/types";
 import { ema, rsi, macd, bollinger, volume, fib } from "@/lib/indicators";
+import { BRIDGE_HTTP } from "@/lib/bridge";
 
 type Timeframe = "1m" | "15m" | "1h" | "4h" | "1d";
 type Coin = "BTC" | "ETH" | "SOL";
@@ -76,7 +77,7 @@ interface Props {
 async function fetchCandles(coin: Coin, interval: string, limit: number): Promise<Candle[]> {
   const params = new URLSearchParams({ interval });
   if (limit > 0) params.set("limit", String(limit));
-  const res = await fetch(`http://localhost:8000/candles/${coin}?${params}`);
+  const res = await fetch(`${BRIDGE_HTTP}/candles/${coin}?${params}`);
   if (!res.ok) return [];
   return res.json();
 }
@@ -90,6 +91,70 @@ export default function ChartPanel({ liveCandles, prices, entryPrice, advanced =
   const [ind, setInd] = useState<Record<IndKey, boolean>>({
     ma: true, bb: false, vol: true, rsi: false, macd: false, fib: false,
   });
+
+  // ── Session clock ──────────────────────────────────────────────────────
+  const [sessionInfo, setSessionInfo] = useState({ name: "", quality: "", remaining: "" });
+  useEffect(() => {
+    function tick() {
+      const now = new Date();
+      const h = now.getUTCHours(), m = now.getUTCMinutes();
+      let name = "", quality = "", endH = 0;
+      if (h >= 13 && h < 16)      { name = "LON/NY"; quality = "PEAK";   endH = 16; }
+      else if (h >= 8  && h < 13) { name = "LONDON"; quality = "HIGH";   endH = 13; }
+      else if (h >= 16 && h < 21) { name = "NEW YORK"; quality = "HIGH"; endH = 21; }
+      else                         { name = "ASIA";   quality = "LOW";    endH = h < 8 ? 8 : 24; }
+      const remMin = (endH - h) * 60 - m;
+      const remaining = `${Math.floor(remMin / 60)}h ${remMin % 60}m`;
+      setSessionInfo({ name, quality, remaining });
+    }
+    tick();
+    const id = setInterval(tick, 60_000);
+    return () => clearInterval(id);
+  }, []);
+
+  // ── AI signals state ─────────────────────────────────────────────────────
+  const [aiSignals, setAiSignals]         = useState<AISignal[]>([]);
+  const [aiGenerating, setAiGenerating]   = useState(false);
+  const aiSignalsRef                      = useRef<AISignal[]>([]);
+
+  // Only consider LONG/SHORT signals — HOLD is never surfaced on chart
+  const latestSignal: AISignal | null = aiSignals.find(s => s.signal !== "HOLD") ?? null;
+
+  // Fetch signals whenever coin or timeframe changes
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch(`${BRIDGE_HTTP}/ai/signals/${coin}?interval=${TF_INTERVAL[tf]}&limit=100`);
+        if (r.ok && !cancelled) {
+          const data: AISignal[] = await r.json();
+          setAiSignals(data);
+          aiSignalsRef.current = data;
+        }
+      } catch { /* bridge offline */ }
+    })();
+    return () => { cancelled = true; };
+  }, [coin, tf]);
+
+  async function generateSignal() {
+    if (aiGenerating) return;
+    setAiGenerating(true);
+    try {
+      const r = await fetch(`${BRIDGE_HTTP}/ai/signals/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ coin, interval: TF_INTERVAL[tf] }),
+      });
+      if (r.ok) {
+        const sig: AISignal = await r.json();
+        if (!sig.error) {
+          setAiSignals(prev => [sig, ...prev]);
+          aiSignalsRef.current = [sig, ...aiSignalsRef.current];
+        }
+      }
+    } catch { /* bridge offline */ }
+    finally { setAiGenerating(false); }
+  }
 
   const chartRef        = useRef<HTMLDivElement>(null);
   const legendRef       = useRef<HTMLDivElement>(null);
@@ -307,6 +372,11 @@ export default function ChartPanel({ liveCandles, prices, entryPrice, advanced =
         indSeriesRef.current = [];
         legendItemsRef.current = [];
         fibLinesRef.current = [];
+        signalLinesRef.current = [];
+        if (seriesMarkersRef.current) {
+          try { seriesMarkersRef.current.detach?.(); } catch {}
+          seriesMarkersRef.current = null;
+        }
         setChartReady(false);
       }
     };
@@ -430,6 +500,97 @@ export default function ChartPanel({ liveCandles, prices, entryPrice, advanced =
     updateLegend(null);
   }, [ind, displayCandles, chartReady, advanced, applyFib, updateLegend]);
 
+  // AI signal price lines (entry / SL / TP) — ref so we can remove them
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const signalLinesRef    = useRef<any[]>([]);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const seriesMarkersRef  = useRef<any>(null);
+
+  const _removeSignalLines = () => {
+    const s = seriesInst.current;
+    if (!s) return;
+    for (const ln of signalLinesRef.current) {
+      try { s.removePriceLine(ln); } catch { /* gone */ }
+    }
+    signalLinesRef.current = [];
+  };
+
+  // Apply AI signal markers + entry/SL/TP lines
+  useEffect(() => {
+    const series = seriesInst.current;
+    if (!series || !chartReady) return;
+
+    // 1. Markers (arrows) — v5 API: createSeriesMarkers(series, markers)
+    try {
+      const lc = lcRef.current;
+      // Deduplicate by time — keep one marker per candle (latest signal wins)
+      // and limit to last 20 signals so chart stays readable
+      const dedupMap = new Map<number, AISignal>();
+      for (const s of aiSignals.slice(0, 20)) {
+        if (!dedupMap.has(s.time)) dedupMap.set(s.time, s);
+      }
+      const markerData = Array.from(dedupMap.values())
+        .map(s => ({
+          time:     s.time,
+          position: s.signal === "LONG" ? "belowBar" : "aboveBar",
+          color:    s.signal === "LONG" ? "#4ecf8a" : "#cf4e4e",
+          shape:    s.signal === "LONG" ? "arrowUp"  : "arrowDown",
+          text:     `AI ${s.signal === "LONG" ? "↑" : "↓"} ${s.confidence}%`,
+          size:     2,
+        }))
+        .sort((a, b) => (a.time as number) - (b.time as number));
+
+      if (lc?.createSeriesMarkers) {
+        // v5 API
+        if (seriesMarkersRef.current) {
+          seriesMarkersRef.current.setMarkers(markerData);
+        } else {
+          seriesMarkersRef.current = lc.createSeriesMarkers(series, markerData);
+        }
+      } else {
+        // v4 fallback
+        series.setMarkers?.(markerData);
+      }
+    } catch { /* ignore marker errors */ }
+
+    // 2. Entry / SL / TP horizontal lines for the LATEST actionable signal
+    _removeSignalLines();
+    const sig = latestSignal;
+    if (!sig || sig.signal === "HOLD") return;
+    const sm = sig.summary ?? {};
+    const newLines: unknown[] = [];
+    if (sm.entry > 0) {
+      try {
+        newLines.push(series.createPriceLine({
+          price: sm.entry,
+          color: "rgba(200,200,200,0.6)", lineWidth: 1, lineStyle: 2,
+          axisLabelVisible: true, title: `ENTRY  ${sig.confidence}%`,
+        }));
+      } catch {}
+    }
+    if (sm.stop_loss > 0) {
+      try {
+        newLines.push(series.createPriceLine({
+          price: sm.stop_loss,
+          color: "rgba(207,78,78,0.7)", lineWidth: 1, lineStyle: 2,
+          axisLabelVisible: true,
+          title: `SL  ${sm.risk_reward || ""}`,
+        }));
+      } catch {}
+    }
+    if (sm.take_profit > 0) {
+      try {
+        newLines.push(series.createPriceLine({
+          price: sm.take_profit,
+          color: "rgba(78,207,138,0.7)", lineWidth: 1, lineStyle: 2,
+          axisLabelVisible: true, title: "TP",
+        }));
+      } catch {}
+    }
+    signalLinesRef.current = newLines as never[];
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [aiSignals, chartReady, latestSignal]);
+
   // Live update last candle (1m mode)
   useEffect(() => {
     if (tf !== "1m" || !seriesInst.current || !liveCandles?.[coin]?.length) return;
@@ -519,6 +680,62 @@ export default function ChartPanel({ liveCandles, prices, entryPrice, advanced =
           <span style={{ fontSize: 9, color: "#555" }}>loading...</span>
         )}
 
+        {/* Session indicator */}
+        {sessionInfo.name && (
+          <span style={{
+            fontFamily: "var(--font-mono), 'IBM Plex Mono', monospace",
+            fontSize: 8,
+            color: sessionInfo.quality === "PEAK" ? "#cfad4e" : sessionInfo.quality === "HIGH" ? "#4ecf8a" : "#444",
+            background: sessionInfo.quality === "PEAK" ? "rgba(207,173,78,0.08)" : sessionInfo.quality === "HIGH" ? "rgba(78,207,138,0.06)" : "rgba(60,60,60,0.06)",
+            border: `1px solid ${sessionInfo.quality === "PEAK" ? "rgba(207,173,78,0.2)" : sessionInfo.quality === "HIGH" ? "rgba(78,207,138,0.15)" : "rgba(60,60,60,0.15)"}`,
+            borderRadius: 2,
+            padding: "2px 6px",
+          }}>
+            {sessionInfo.name} · {sessionInfo.remaining}
+          </span>
+        )}
+
+        {/* AI signal badge — LONG/SHORT only, never HOLD */}
+        {latestSignal && latestSignal.signal !== "HOLD" ? (
+          <span style={{
+            fontFamily: "var(--font-mono), 'IBM Plex Mono', monospace",
+            fontSize: 9,
+            color: latestSignal.signal === "LONG" ? "#4ecf8a" : "#cf4e4e",
+            background: latestSignal.signal === "LONG" ? "rgba(78,207,138,0.08)" : "rgba(207,78,78,0.08)",
+            border: `1px solid ${latestSignal.signal === "LONG" ? "rgba(78,207,138,0.25)" : "rgba(207,78,78,0.25)"}`,
+            borderRadius: 2, padding: "2px 6px",
+          }}>
+            AI {latestSignal.signal === "LONG" ? "↑" : "↓"} {latestSignal.confidence}%
+          </span>
+        ) : (
+          <span style={{
+            fontFamily: "var(--font-mono), 'IBM Plex Mono', monospace",
+            fontSize: 8, color: "#2a2a2a",
+          }}>
+            AI WATCHING
+          </span>
+        )}
+
+        {/* Generate button */}
+        <button
+          onClick={generateSignal}
+          disabled={aiGenerating}
+          title="Generate AI signal for current coin + timeframe"
+          style={{
+            fontFamily: "var(--font-mono), 'IBM Plex Mono', monospace",
+            fontSize: 9,
+            padding: "2px 7px",
+            background: aiGenerating ? "#0f1a12" : "#101e30",
+            border: `1px solid ${aiGenerating ? "#1c3a28" : "#1c3a60"}`,
+            borderRadius: 2,
+            color: aiGenerating ? "#4ecf8a" : "#4e8ecf",
+            cursor: aiGenerating ? "default" : "pointer",
+            opacity: aiGenerating ? 0.7 : 1,
+          }}
+        >
+          {aiGenerating ? "AI…" : "AI ✦"}
+        </button>
+
         {currentPrice > 0 && (
           <span
             style={{
@@ -532,6 +749,55 @@ export default function ChartPanel({ liveCandles, prices, entryPrice, advanced =
           </span>
         )}
       </div>
+
+      {/* AI signal strip — only for LONG/SHORT, never for HOLD */}
+      {latestSignal && latestSignal.signal !== "HOLD" && (
+        <div style={{
+          padding: "4px 12px",
+          borderBottom: "1px solid #0e0e0e",
+          display: "flex", alignItems: "center", gap: 8,
+          background: latestSignal.signal === "LONG" ? "rgba(58,170,114,0.04)" : "rgba(170,58,58,0.04)",
+          flexShrink: 0,
+        }}>
+          <span style={{
+            fontFamily: "var(--font-mono), 'IBM Plex Mono', monospace",
+            fontSize: 8,
+            color: latestSignal.signal === "LONG" ? "#3aaa72" : "#aa3a3a",
+            fontWeight: 700, flexShrink: 0,
+          }}>
+            {latestSignal.signal === "LONG" ? "↑ LONG" : "↓ SHORT"} {latestSignal.confidence}%
+          </span>
+          {(latestSignal.summary?.entry ?? 0) > 0 && (
+            <>
+              <span style={{ fontFamily: "var(--font-mono), monospace", fontSize: 8, color: "#888", flexShrink: 0 }}>
+                E ${(latestSignal.summary.entry).toLocaleString("en-US", { maximumFractionDigits: 2 })}
+              </span>
+              {(latestSignal.summary?.stop_loss ?? 0) > 0 && (
+                <span style={{ fontFamily: "var(--font-mono), monospace", fontSize: 8, color: "#cf4e4e", flexShrink: 0 }}>
+                  SL ${latestSignal.summary.stop_loss.toLocaleString("en-US", { maximumFractionDigits: 2 })}
+                </span>
+              )}
+              {(latestSignal.summary?.take_profit ?? 0) > 0 && (
+                <span style={{ fontFamily: "var(--font-mono), monospace", fontSize: 8, color: "#4ecf8a", flexShrink: 0 }}>
+                  TP ${latestSignal.summary.take_profit.toLocaleString("en-US", { maximumFractionDigits: 2 })}
+                </span>
+              )}
+              {latestSignal.summary?.risk_reward && (
+                <span style={{ fontFamily: "var(--font-mono), monospace", fontSize: 8, color: "#cfad4e", flexShrink: 0 }}>
+                  {latestSignal.summary.risk_reward}
+                </span>
+              )}
+            </>
+          )}
+          <span style={{
+            fontFamily: "var(--font-mono), 'IBM Plex Mono', monospace",
+            fontSize: 8, color: "#3a3a3a",
+            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1,
+          }}>
+            {latestSignal.reasoning?.slice(0, 160)}
+          </span>
+        </div>
+      )}
 
       {/* Indicator toolbar (advanced only) */}
       {advanced && (

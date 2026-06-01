@@ -1,5 +1,5 @@
 # MEGALPHA — Project Diagnostic
-**Last updated:** May 29, 2026
+**Last updated:** June 1, 2026
 **Project path:** `C:\Users\anakin\s-tier\megalpha`
 **Stack:** Next.js 16 · React 19 · TypeScript · Tailwind CSS v4 · IBM Plex Mono + Inter · FastAPI · Python 3.12 · Stable-Baselines3 (PPO) + PyTorch + Gymnasium · Hyperliquid WebSocket + REST API
 
@@ -15,14 +15,15 @@ MEGALPHA is a **professional quantitative trading platform** built around a loca
 | **2** | Backtest engine + live order book + 1m chart fix | ✅ **Complete** |
 | **2.5** | Chart indicators (MA/BB/Vol/RSI/MACD/Fib) + crosshair legend | ✅ **Complete** |
 | **3** | RL agent (PPO, local) + live paper-forward + dashboard | ✅ **Complete** |
-| **3.5** | Backtest rigor (costs, walk-forward, benchmark, kill-switch) | ✅ engine done · strategy-save/live/charts/WS left |
-| **4** | Data hub (funding, OI, liquidations, news) | 🔲 Planned |
-| **5** | Journal (Notion-style, SQLite) | 🔲 Planned |
+| **3.5** | Backtest rigor + strategy save/load + live execution hardening + WS robustness | ✅ **Complete** |
+| **4** | Data hub (funding, OI, liquidations) | ✅ **Complete** |
+| **5** | Journal (SQLite) + OpenRouter AI Analyst | ✅ **Complete** |
+| **5.5** | AI Signal Engine (institutional-grade, BTC/ETH/SOL) | ✅ **Complete** |
 | **6** | 24/7 cloud deployment (Oracle free VM) | ⏸ Paused (scaffold pending) |
 
 ---
 
-## 2. CURRENT STATE (May 29, 2026)
+## 2. CURRENT STATE (June 1, 2026)
 
 ### What is running
 
@@ -54,19 +55,25 @@ localhost:8000   Python bridge server
 | Live-inference staleness guard (rejects a model whose feature width ≠ current) | ✅ |
 | **Backtest realistic costs** (fee + slippage + funding) + **buy-hold benchmark/alpha** | ✅ |
 | **Walk-forward validation** + shared **risk module** (`risk.py`: sizing, stop, kill-switch) | ✅ |
+| **Strategy save/load**: named configs persisted to `server/strategies/`, CRUD endpoints | ✅ |
+| **Live execution hardening**: position-query-before-order, max-DD kill-switch, per-trade size cap, slippage guard, post-only (ALO limit), 60s reconciliation, userFills feed, webData2 account push, unified `HLOpenRequest` trade-config | ✅ |
+| **WS reconnect backoff**: frontend exponential 1s→30s (was fixed 3s) | ✅ |
+| **Manual-confirm order screen**: real-order confirm modal in RL Agent page (only when `HL_PRIVATE_KEY` configured) | ✅ |
+| `hlCancel` hook + `live_halted` kill-switch state propagated to dashboard WS | ✅ |
+| **Data Hub** (Phase 4): live funding rate + APR per coin, OI (USD), 24h vol, day change; funding history chart (BaselineSeries, 7/30/90d, per coin); liquidations live feed from WS trades | ✅ |
+| **Journal** (Phase 5): entry list, title + body editor, auto-save (1.5s debounce), SQLite via `server/db.py` | ✅ |
+| **OpenRouter AI Analyst**: streaming chat (SSE), injects live prices + RL agent state + journal entry as context; model configurable via `OPENROUTER_MODEL` env var | ✅ |
+| **AI Signal Engine** (Phase 5.5): institutional-grade LONG/SHORT signals for BTC/ETH/SOL only; rules: swing-level SL, 4h bias, 2.5:1 min R:R, 75% confidence floor, Asia session filter; runs every 1h; HOLD never surfaced | ✅ |
+| **Chart signal overlays**: session indicator (ASIA/LONDON/NY/OVERLAP + countdown), AI badge, LONG/SHORT reasoning strip with Entry·SL·TP·R:R, arrow markers (v5 API `createSeriesMarkers`), entry/SL/TP horizontal lines | ✅ |
+| **Signal dedup**: snaps to 1h candle boundary; skips if same direction already exists for that candle | ✅ |
+| **⚡ Signals page**: live dashboard of all LONG/SHORT signals, 15s auto-refresh, filter chips, confidence sort | ✅ |
+| **Notifications**: topbar bell badge + `SignalToast` + browser `Notification` API on LONG/SHORT ≥ 75% | ✅ |
 | Pytest suite: candle endpoint | ✅ |
 
 ### What is NOT built yet
 
 | Feature | Phase |
 |---|---|
-| Save/load **named** strategies + forward-test a saved one | 3.5 |
-| Manual-confirm Hyperliquid order screen (per-order confirm; no auto-execution) | 3.5 |
-| Live-execution hardening: query-position-before-order, reduceOnly closes, slippage guard, per-trade % size cap, live max-DD kill-switch, post-only/maker option, partial-fill handling, 60s reconciliation, unified trade-config | 3.5 |
-| WS robustness: exponential-backoff reconnect (1s→30s) + `userFills`/`webData2` live position+fill feed (replace REST account polling) | 3.5 |
-| Deeper chart history (BTC/ETH/SOL from launch, beyond HL's ~5k cap) | 3.5 |
-| Funding / OI / liquidations / news (Data Hub) | 4 |
-| Journal (Tiptap + SQLite) | 5 |
 | 24/7 cloud deploy artifacts (Docker, Caddy, configurable bridge URL) | 6 |
 
 ---
@@ -200,6 +207,18 @@ npm run dev                      # http://localhost:3000
 ```
 Edit Python in `server/` → **restart the bridge** (no auto-reload). Edit frontend → Turbopack hot-reloads.
 
+### Retrain RL agent (run once, takes 20-40 min)
+```bash
+# Default: ETH 4h 500k steps (backtests show this is the strongest timeframe)
+python server/train_rl.py
+
+# Alternative coins/timeframes
+python server/train_rl.py --coin SOL --interval 4h --steps 500000
+python server/train_rl.py --coin BTC --interval 1h --steps 300000 --turnover 0.0003
+
+# After training: RESTART the bridge to load the new policy
+```
+
 ---
 
 ## 9. DEPLOYMENT (Phase 6 — paused)
@@ -223,4 +242,4 @@ Goal: run the bridge + agent 24/7. Chosen host: **Oracle Cloud Always-Free ARM V
 
 ---
 
-*Diagnostic updated May 29, 2026 — Phases 1–3 complete (charts + indicators, backtest engine, RL agent with live paper-forward + rebuilt dashboard). Next: backtest rigor (3.5).*
+*Diagnostic updated June 1, 2026 — Phases 1–5.5 complete. Phase 5 added: Journal page (SQLite CRUD, auto-save, entry list) + OpenRouter AI Analyst (streaming SSE, live market context injection, configurable model). Next: Phase 6 cloud deploy (Oracle ARM VM).*

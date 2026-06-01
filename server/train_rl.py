@@ -61,9 +61,9 @@ def main() -> None:
         pass
 
     ap = argparse.ArgumentParser(description="Train a PPO trading agent for MEGALPHA")
-    ap.add_argument("--coin",     default="BTC")
-    ap.add_argument("--interval", default="1h")
-    ap.add_argument("--steps",    type=int, default=200_000, help="PPO timesteps")
+    ap.add_argument("--coin",     default="ETH")
+    ap.add_argument("--interval", default="4h")
+    ap.add_argument("--steps",    type=int, default=500_000, help="PPO timesteps")
     ap.add_argument("--size",     type=float, default=200.0, help="USD margin per trade")
     ap.add_argument("--leverage", type=int, default=5)
     ap.add_argument("--seed",     type=int, default=42)

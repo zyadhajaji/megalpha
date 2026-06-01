@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 import type { HLStreamData } from "@/hooks/useHLStream";
+import { BRIDGE_HTTP } from "@/lib/bridge";
+import { useTrading } from "@/hooks/useTrading";
 
 const mono = "var(--font-mono, 'IBM Plex Mono', monospace)";
 const sans = "var(--font-sans, Inter, sans-serif)";
@@ -42,11 +44,23 @@ const posWord = (p?: number) => (p == null || p === 0 ? "FLAT" : p > 0 ? "LONG" 
 export default function RLAgentPage({ hl }: { hl: HLStreamData }) {
   const [status, setStatus] = useState<RLStatus | null>(null);
 
+  // live-execution form state
+  const [execSize, setExecSize]         = useState("200");
+  const [execLev, setExecLev]           = useState("5");
+  const [execStop, setExecStop]         = useState("0");
+  const [execMaxDD, setExecMaxDD]       = useState("0");
+  const [execSlip, setExecSlip]         = useState("5");
+  const [execPostOnly, setExecPostOnly] = useState(false);
+  const [showConfirm, setShowConfirm]   = useState(false);
+  const [execMsg, setExecMsg]           = useState<string | null>(null);
+
+  const { loading: execLoading, hlOpen, hlClose } = useTrading();
+
   useEffect(() => {
     let alive = true;
     const poll = async () => {
       try {
-        const r = await fetch("http://localhost:8000/rl/status");
+        const r = await fetch(`${BRIDGE_HTTP}/rl/status`);
         if (!r.ok) return;
         const d = await r.json();
         if (alive) setStatus(d);
@@ -159,7 +173,114 @@ export default function RLAgentPage({ hl }: { hl: HLStreamData }) {
               Inference + paper fill run every 10s against the latest live price.
             </div>
           </div>
+
+          {/* ── Live execution (only when HL trading is configured) ── */}
+          {hl.hlConfigured && (
+            <div className="panel" style={{ padding: "14px 18px", border: "1px solid #2a1a1a" }}>
+              <SectionLabel>LIVE EXECUTION · REAL HYPERLIQUID ORDERS · NOT PAPER TRADING</SectionLabel>
+
+              {hl.liveHalted && (
+                <div style={{ fontFamily: mono, fontSize: 10, color: "#cf4e4e", background: "#1a0808", border: "1px solid #3a1010", borderRadius: 3, padding: "6px 10px", marginBottom: 12 }}>
+                  ⚠ MAX-DRAWDOWN KILL-SWITCH ACTIVE — restart the bridge to reset
+                </div>
+              )}
+
+              <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "flex-end", marginBottom: 12 }}>
+                <ExecInput label="Size USD" value={execSize} onChange={setExecSize} prefix="$" width={72} />
+                <ExecInput label="Leverage" value={execLev} onChange={setExecLev} suffix="×" width={44} />
+                <ExecInput label="Stop %" value={execStop} onChange={setExecStop} width={44} />
+                <ExecInput label="Max DD %" value={execMaxDD} onChange={setExecMaxDD} width={44} />
+                <ExecInput label="Slip bps" value={execSlip} onChange={setExecSlip} width={44} />
+                <label style={{ display: "flex", alignItems: "center", gap: 6, fontFamily: mono, fontSize: 10, color: "#888", cursor: "pointer" }}>
+                  <input type="checkbox" checked={execPostOnly} onChange={(e) => setExecPostOnly(e.target.checked)} style={{ accentColor: "#4e8ecf" }} />
+                  post-only
+                </label>
+              </div>
+
+              <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                <button
+                  disabled={execLoading || decision === "HOLD" || decision === "—" || hl.liveHalted}
+                  onClick={() => { setExecMsg(null); setShowConfirm(true); }}
+                  style={{
+                    fontFamily: mono, fontSize: 11, fontWeight: 700, padding: "7px 18px",
+                    background: execLoading || decision === "HOLD" || hl.liveHalted ? "#111" : (decision === "LONG" ? "#071a0e" : "#1a0808"),
+                    border: `1px solid ${execLoading || decision === "HOLD" || hl.liveHalted ? "#1a1a1a" : (decision === "LONG" ? "#0e3320" : "#3a1010")}`,
+                    borderRadius: 3, color: execLoading || decision === "HOLD" || hl.liveHalted ? "#333" : decisionColor,
+                    cursor: execLoading || decision === "HOLD" || hl.liveHalted ? "not-allowed" : "pointer",
+                  }}
+                >
+                  {execLoading ? "EXECUTING…" : `EXECUTE ${decision} (CONFIRM)`}
+                </button>
+
+                {hl.hlAccount && (
+                  <button
+                    disabled={execLoading}
+                    onClick={async () => {
+                      const coin = (meta.coin ?? "BTC").toUpperCase();
+                      setExecMsg(null);
+                      const r = await hlClose(coin);
+                      setExecMsg(r.ok ? `Closed ${coin}` : (r.error ?? "Close failed"));
+                    }}
+                    style={{ fontFamily: mono, fontSize: 10, padding: "5px 14px", background: "none", border: "1px solid #2a1a1a", borderRadius: 3, color: "#aa3a3a", cursor: execLoading ? "not-allowed" : "pointer" }}
+                  >
+                    CLOSE POSITION
+                  </button>
+                )}
+
+                {execMsg && (
+                  <span style={{ fontFamily: mono, fontSize: 10, color: execMsg.startsWith("Closed") || execMsg.startsWith("Order") ? GREEN : RED }}>
+                    {execMsg}
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
         </>
+      )}
+
+      {/* ── Confirm modal ── */}
+      {showConfirm && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.8)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 200 }}>
+          <div style={{ background: "#0c0c0c", border: "1px solid #3a1010", borderRadius: 4, padding: 24, width: 380, display: "flex", flexDirection: "column", gap: 14 }}>
+            <div style={{ fontFamily: mono, fontSize: 10, color: "#cf4e4e", letterSpacing: "0.1em" }}>⚠ REAL ORDER CONFIRMATION</div>
+            <div style={{ fontFamily: mono, fontSize: 11, color: "#e8e8e8", lineHeight: 1.7 }}>
+              You are about to place a <strong style={{ color: decisionColor }}>{decision}</strong> order on Hyperliquid.<br />
+              <span style={{ color: "#888" }}>This is NOT paper trading — real USDC will be used.</span>
+            </div>
+            <div style={{ background: "#070707", border: "1px solid #1c1c1c", borderRadius: 3, padding: "10px 14px", fontFamily: mono, fontSize: 10, lineHeight: 2, color: "#aaa" }}>
+              <div><span style={{ color: "#555" }}>coin</span>     {(meta.coin ?? "BTC").toUpperCase()}</div>
+              <div><span style={{ color: "#555" }}>direction</span>  <span style={{ color: decisionColor }}>{decision}</span></div>
+              <div><span style={{ color: "#555" }}>margin</span>    ${parseFloat(execSize) || 0}</div>
+              <div><span style={{ color: "#555" }}>leverage</span>  {parseInt(execLev) || 5}×</div>
+              <div><span style={{ color: "#555" }}>notional</span>  ~${((parseFloat(execSize) || 0) * (parseInt(execLev) || 5)).toFixed(0)}</div>
+              {parseFloat(execStop) > 0 && <div><span style={{ color: "#555" }}>stop loss</span> {execStop}% margin</div>}
+              {parseFloat(execMaxDD) > 0 && <div><span style={{ color: "#555" }}>kill DD</span>   {execMaxDD}%</div>}
+              {execPostOnly && <div><span style={{ color: "#555" }}>order type</span> post-only (ALO)</div>}
+            </div>
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              <button onClick={() => setShowConfirm(false)} style={{ fontFamily: mono, fontSize: 11, padding: "6px 16px", background: "none", border: "1px solid #1c1c1c", borderRadius: 3, color: "#888", cursor: "pointer" }}>
+                CANCEL
+              </button>
+              <button
+                onClick={async () => {
+                  setShowConfirm(false);
+                  const coin    = (meta.coin ?? "BTC").toUpperCase();
+                  const is_buy  = decision === "LONG";
+                  const r = await hlOpen(coin, is_buy, parseFloat(execSize) || 200, parseInt(execLev) || 5, {
+                    slippage_tolerance_bps: parseFloat(execSlip) || 0,
+                    stop_loss_pct:   (parseFloat(execStop) || 0) / 100,
+                    max_drawdown_pct:(parseFloat(execMaxDD) || 0) / 100,
+                    post_only: execPostOnly,
+                  });
+                  setExecMsg(r.ok ? `Order sent — ${coin} ${decision}` : (r.error ?? "Order failed"));
+                }}
+                style={{ fontFamily: mono, fontSize: 11, fontWeight: 700, padding: "6px 18px", background: decision === "LONG" ? "#071a0e" : "#1a0808", border: `1px solid ${decision === "LONG" ? "#0e3320" : "#3a1010"}`, borderRadius: 3, color: decisionColor, cursor: "pointer" }}
+              >
+                CONFIRM {decision}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* ── How to train (when offline) ── */}
@@ -271,5 +392,24 @@ function Code({ children }: { children: React.ReactNode }) {
     }}>
       {children}
     </code>
+  );
+}
+
+function ExecInput({ label, value, onChange, prefix, suffix, width = 72 }: {
+  label: string; value: string; onChange: (v: string) => void;
+  prefix?: string; suffix?: string; width?: number;
+}) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+      <div style={{ fontFamily: mono, fontSize: 8, color: "#444", letterSpacing: "0.08em" }}>{label.toUpperCase()}</div>
+      <div style={{ display: "flex", alignItems: "center", gap: 2 }}>
+        {prefix && <span style={{ fontFamily: mono, fontSize: 10, color: "#444" }}>{prefix}</span>}
+        <input value={value} onChange={(e) => onChange(e.target.value)} style={{
+          width, fontFamily: mono, fontSize: 11, background: "#0a0a0a", border: "1px solid #1c1c1c",
+          borderRadius: 2, color: "#e8e8e8", padding: "3px 6px", outline: "none",
+        }} />
+        {suffix && <span style={{ fontFamily: mono, fontSize: 10, color: "#444" }}>{suffix}</span>}
+      </div>
+    </div>
   );
 }

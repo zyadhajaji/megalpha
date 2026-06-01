@@ -43,6 +43,20 @@ export interface Trade {
   close_time: number | null;
 }
 
+export interface AISignal {
+  id: number;
+  coin: string;
+  interval: string;
+  time: number;         // unix seconds — used as chart marker position
+  signal: "LONG" | "SHORT" | "HOLD";
+  confidence: number;   // 0-100
+  reasoning: string;
+  price: number;
+  support: number;
+  resistance: number;
+  created_at: number;
+}
+
 export interface RLAgentState {
   status: "scanning" | "in_trade" | "training" | "offline";
   confidence: number;             // 0–1

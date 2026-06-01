@@ -1,19 +1,24 @@
 "use client";
 
 import { useState, useCallback } from "react";
-
-const BASE = "http://localhost:8000";
-
-// ─── types ────────────────────────────────────────────────────────────────────
+import { BRIDGE_HTTP as BASE } from "@/lib/bridge";
 
 export interface TradeResult {
   ok: boolean;
   error?: string;
   coin?: string;
   size?: number;
-  ticket?: number;
   price?: number;
-  volume?: number;
+  slippage_warning?: { fill_px: number; mid_px: number; slippage_bps: number; threshold_bps: number };
+}
+
+export interface TradeOptions {
+  slippage_tolerance_bps?: number;
+  max_position_pct?: number;
+  max_drawdown_pct?: number;
+  stop_loss_pct?: number;
+  take_profit_pct?: number;
+  post_only?: boolean;
 }
 
 interface TradingState {
@@ -21,8 +26,6 @@ interface TradingState {
   lastResult: TradeResult | null;
   lastError: string | null;
 }
-
-// ─── hook ─────────────────────────────────────────────────────────────────────
 
 export function useTrading() {
   const [state, setState] = useState<TradingState>({
@@ -50,13 +53,18 @@ export function useTrading() {
   }, []);
 
   const hlOpen = useCallback(
-    (coin: string, is_buy: boolean, size_usd: number, leverage = 5) =>
-      post("/trade/hl/open", { coin, is_buy, size_usd, leverage }),
+    (coin: string, is_buy: boolean, size_usd: number, leverage = 5, opts?: TradeOptions) =>
+      post("/trade/hl/open", { coin, is_buy, size_usd, leverage, ...opts }),
     [post]
   );
 
   const hlClose = useCallback(
     (coin: string) => post("/trade/hl/close", { coin }),
+    [post]
+  );
+
+  const hlCancel = useCallback(
+    (coin: string, oid: number) => post("/trade/hl/cancel", { coin, oid }),
     [post]
   );
 
@@ -66,5 +74,6 @@ export function useTrading() {
     lastError:  state.lastError,
     hlOpen,
     hlClose,
+    hlCancel,
   };
 }

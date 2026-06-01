@@ -17,11 +17,17 @@ from typing import Optional
 import uvicorn
 import websockets
 from dotenv import load_dotenv
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 import candle_cache
+import strategies as _strategies
+import db as _db
+
+# ── signal alert state (populated by scanner_loop, broadcast via WS) ─────────
+signal_alerts: list[dict] = []   # most recent first, capped at 50
 # ─── env / logging ────────────────────────────────────────────────────────────
 
 load_dotenv(Path(__file__).parent / ".env")
@@ -87,6 +93,15 @@ price_history: dict[str, list[float]]  = {c: [] for c in COINS}
 order_books: dict[str, dict]       = {}
 clients: list[WebSocket]           = []
 hl_account_cache: dict             = {}
+
+# ─── live-trading runtime state ──────────────────────────────────────────────
+live_peak_equity: float = 0.0   # high-water mark for account-level kill-switch
+live_halted: bool       = False  # True once max-DD kill-switch fires; blocks new orders
+recent_fills: list      = []     # last 50 fills from userFills WS subscription
+
+# ─── data-hub state (Phase 4) ─────────────────────────────────────────────────
+market_metrics: dict = {}        # current funding/OI/vol/mark per coin, polled every 30s
+recent_liquidations: list = []   # last 100 liquidation events from WS trades
 
 # ─── RL agent state (Phase 3) ─────────────────────────────────────────────────
 
@@ -440,6 +455,16 @@ def build_payload() -> dict:
         payload["hlAccount"] = hl_account_cache
     if rl_state:
         payload["rl_agent"] = rl_state
+    payload["hl_configured"] = hl_trader is not None
+    payload["live_halted"]   = live_halted
+    if recent_fills:
+        payload["recent_fills"] = recent_fills[-10:]
+    if market_metrics:
+        payload["market_metrics"] = market_metrics
+    if recent_liquidations:
+        payload["liquidations"] = recent_liquidations[-30:]
+    if signal_alerts:
+        payload["signal_alert"] = signal_alerts[0]   # latest alert only
     return payload
 
 # ─── FastAPI app ──────────────────────────────────────────────────────────────
@@ -456,16 +481,21 @@ app.add_middleware(
 # ─── background tasks ─────────────────────────────────────────────────────────
 
 async def hl_listener() -> None:
+    backoff = 1.0   # exponential reconnect backoff (1s → 30s cap), reset on connect
     while True:
         try:
             async with websockets.connect(
                 HL_WS_URL, ping_interval=20, ping_timeout=30, open_timeout=15
             ) as ws:
                 log.info("Connected to Hyperliquid WS")
+                backoff = 1.0
                 await ws.send(json.dumps({"method": "subscribe", "subscription": {"type": "allMids"}}))
                 for coin in COINS:
                     await ws.send(json.dumps({"method": "subscribe", "subscription": {"type": "trades",  "coin": coin}}))
                     await ws.send(json.dumps({"method": "subscribe", "subscription": {"type": "l2Book", "coin": coin}}))
+                if hl_trader:
+                    await ws.send(json.dumps({"method": "subscribe", "subscription": {"type": "userFills", "user": hl_trader.address}}))
+                    await ws.send(json.dumps({"method": "subscribe", "subscription": {"type": "webData2",  "user": hl_trader.address}}))
 
                 async for raw in ws:
                     try:
@@ -484,18 +514,53 @@ async def hl_listener() -> None:
                                 if t.get("coin") in COINS:
                                     push_trade(t["coin"], float(t.get("px", 0)),
                                                int(t.get("time", time.time() * 1000)))
+                                    if t.get("liquidation"):
+                                        liq = t["liquidation"]
+                                        recent_liquidations.append({
+                                            "time":     int(t.get("time", time.time() * 1000)),
+                                            "coin":     t.get("coin", ""),
+                                            "side":     "LONG" if t.get("side") == "A" else "SHORT",
+                                            "px":       float(t.get("px", 0)),
+                                            "sz":       float(t.get("sz", 0)),
+                                            "notional": float(t.get("px", 0)) * float(t.get("sz", 0)),
+                                            "user":     (str(liq.get("liquidatedUser") or ""))[:10],
+                                        })
+                                        if len(recent_liquidations) > 100:
+                                            del recent_liquidations[: len(recent_liquidations) - 100]
 
                         elif ch == "l2Book":
                             coin = data.get("coin", "")
                             if coin in COINS:
                                 order_books[coin] = data
 
+                        elif ch == "userFills":
+                            fills_raw = data if isinstance(data, list) else (data.get("fills", []) if isinstance(data, dict) else [])
+                            for fill in (fills_raw if isinstance(fills_raw, list) else []):
+                                if isinstance(fill, dict):
+                                    recent_fills.append({
+                                        "coin": fill.get("coin", ""),
+                                        "side": fill.get("side", ""),
+                                        "px":   float(fill.get("px", 0)),
+                                        "sz":   float(fill.get("sz", 0)),
+                                        "time": fill.get("time", 0),
+                                        "oid":  fill.get("oid", 0),
+                                        "fee":  float(fill.get("fee", 0)),
+                                    })
+                            if len(recent_fills) > 50:
+                                del recent_fills[: len(recent_fills) - 50]
+                            asyncio.create_task(_refresh_account())
+
+                        elif ch == "webData2":
+                            # Account state push — trigger immediate refresh
+                            asyncio.create_task(_refresh_account())
+
                     except Exception as exc:
                         log.debug("WS parse error: %s", exc)
 
         except Exception as exc:
-            log.warning("HL WS disconnected (%s), retry in 5s", exc)
-            await asyncio.sleep(5)
+            log.warning("HL WS disconnected (%s), reconnecting in %.0fs", exc, backoff)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 30.0)
 
 
 async def broadcaster() -> None:
@@ -520,6 +585,7 @@ async def broadcaster() -> None:
 
 async def account_poller() -> None:
     """Refresh HL account state every ACCOUNT_POLL_SECS."""
+    global live_peak_equity
     while True:
         await asyncio.sleep(ACCOUNT_POLL_SECS)
         if hl_trader:
@@ -527,8 +593,85 @@ async def account_poller() -> None:
                 state = await asyncio.to_thread(hl_trader.get_account_state)
                 hl_account_cache.clear()
                 hl_account_cache.update(state)
+                equity = float(state.get("account_value") or 0)
+                if equity > 0:
+                    live_peak_equity = max(live_peak_equity, equity)
             except Exception as exc:
                 log.debug("HL account poll error: %s", exc)
+
+
+async def _refresh_account() -> None:
+    """Immediate account-state refresh — triggered by fills or webData2 push."""
+    global live_peak_equity
+    if not hl_trader:
+        return
+    try:
+        state = await asyncio.to_thread(hl_trader.get_account_state)
+        hl_account_cache.clear()
+        hl_account_cache.update(state)
+        equity = float(state.get("account_value") or 0)
+        if equity > 0:
+            live_peak_equity = max(live_peak_equity, equity)
+    except Exception as exc:
+        log.debug("Account refresh error: %s", exc)
+
+
+def _fetch_market_metrics_sync() -> dict:
+    """Synchronous: call HL metaAndAssetCtxs and return per-coin metrics dict."""
+    import urllib.request as _req
+    import json as _j
+    url = "https://api.hyperliquid.xyz/info"
+    payload = _j.dumps({"type": "metaAndAssetCtxs"}).encode()
+    req = _req.Request(url, data=payload, headers={"Content-Type": "application/json"})
+    with _req.urlopen(req, timeout=10) as resp:
+        result = _j.loads(resp.read())
+    meta_obj, ctxs = result[0], result[1]
+    universe = meta_obj.get("universe", [])
+    out: dict = {}
+    for i, asset in enumerate(universe):
+        name = asset.get("name", "")
+        if name not in COINS or i >= len(ctxs):
+            continue
+        ctx = ctxs[i]
+        rate = float(ctx.get("funding") or 0)
+        mark = float(ctx.get("markPx") or ctx.get("midPx") or 0)
+        prev = float(ctx.get("prevDayPx") or 0)
+        oi   = float(ctx.get("openInterest") or 0)
+        vol  = float(ctx.get("dayNtlVlm") or 0)
+        out[name] = {
+            "funding_rate":  rate,
+            "funding_apr":   rate * 24 * 365 * 100,   # assuming 1-hour periods
+            "open_interest": oi,
+            "oi_usd":        oi * mark,
+            "mark_px":       mark,
+            "prev_day_px":   prev,
+            "day_ntl_vol":   vol,
+            "day_change_pct": (mark - prev) / prev * 100 if prev > 0 else 0.0,
+        }
+    return out
+
+
+async def market_metrics_poller() -> None:
+    """Poll HL metaAndAssetCtxs every 30s for live funding, OI, and volume."""
+    while True:
+        try:
+            result = await asyncio.to_thread(_fetch_market_metrics_sync)
+            market_metrics.clear()
+            market_metrics.update(result)
+        except Exception as exc:
+            log.debug("Market metrics poll error: %s", exc)
+        await asyncio.sleep(30)
+
+
+async def reconcile_after(coin: str, delay_secs: float = 60.0) -> None:
+    """Post-trade reconciliation: refresh account state after delay and log the position."""
+    await asyncio.sleep(delay_secs)
+    await _refresh_account()
+    pos = next(
+        (p for p in hl_account_cache.get("positions", []) if p.get("coin") == coin.upper()),
+        None,
+    )
+    log.info("Reconcile [%s] — position: %s", coin, pos or "none")
 
 
 async def fetch_historical_candles() -> None:
@@ -589,6 +732,7 @@ async def prewarm_history_cache() -> None:
 
 @app.on_event("startup")
 async def startup() -> None:
+    _db.init_db()
     load_rl_policy()
     asyncio.create_task(fetch_historical_candles())
     asyncio.create_task(hl_listener())
@@ -596,6 +740,20 @@ async def startup() -> None:
     asyncio.create_task(account_poller())
     asyncio.create_task(prewarm_history_cache())
     asyncio.create_task(rl_inference_loop())
+    asyncio.create_task(market_metrics_poller())
+    asyncio.create_task(btc_eth_sol_signal_loop())
+    asyncio.create_task(btc_eth_sol_4h_signal_loop())
+
+    from outcome_checker import outcome_checker_loop as _outcome_loop
+
+    async def _candle_history(coin: str, interval: str) -> list[dict]:
+        launch_ms   = COIN_START_MS.get(coin, COIN_START_MS["BTC"])
+        interval_ms = INTERVAL_MS.get(interval, INTERVAL_MS["1h"])
+        return await candle_cache.get_history(
+            coin, interval, launch_ms, interval_ms, fetch_candles_paginated
+        )
+
+    asyncio.create_task(_outcome_loop(_candle_history))
 
 # ─── WebSocket endpoint ───────────────────────────────────────────────────────
 
@@ -625,6 +783,14 @@ class HLOpenRequest(BaseModel):
     is_buy: bool
     size_usd: float
     leverage: int = 5
+    # Execution quality
+    slippage_tolerance_bps: float = 0.0   # warn when fill deviates beyond this (0 = off)
+    post_only: bool = False                # place at best bid/ask (ALO) instead of market
+    # Account-level risk controls (0 = disabled)
+    max_position_pct: float = 0.0         # cap margin to this fraction of current equity
+    max_drawdown_pct: float = 0.0         # block if equity drawdown from peak exceeds this
+    stop_loss_pct: float = 0.0
+    take_profit_pct: float = 0.0
 
 class HLCloseRequest(BaseModel):
     coin: str
@@ -638,9 +804,62 @@ class HLCancelRequest(BaseModel):
 async def hl_open(req: HLOpenRequest) -> dict:
     if not hl_trader:
         return {"ok": False, "error": "Add HL_PRIVATE_KEY to server/.env to enable live trading"}
-    return await asyncio.to_thread(
-        hl_trader.market_open, req.coin, req.is_buy, req.size_usd, req.leverage
-    )
+
+    global live_halted, live_peak_equity
+    if live_halted:
+        return {"ok": False, "error": "Max-drawdown kill-switch is active — bridge restart required to reset"}
+
+    # ── 1. query position before order ───────────────────────────────────────
+    account = await asyncio.to_thread(hl_trader.get_account_state)
+    existing = next((p for p in account.get("positions", []) if p["coin"] == req.coin.upper()), None)
+    if existing:
+        return {"ok": False, "error": f"Position already open for {req.coin} (size={existing['size']:.4f}) — close it first"}
+
+    equity = float(account.get("account_value") or 0)
+    if equity > 0:
+        live_peak_equity = max(live_peak_equity, equity)
+
+    # ── 2. account-level max-DD kill-switch ──────────────────────────────────
+    if req.max_drawdown_pct > 0 and live_peak_equity > 0:
+        from risk import RiskConfig, kill_switch_triggered
+        if kill_switch_triggered(equity, live_peak_equity, RiskConfig(max_drawdown_pct=req.max_drawdown_pct)):
+            live_halted = True
+            return {"ok": False, "error": f"Max-drawdown kill-switch triggered (peak=${live_peak_equity:.0f}, now=${equity:.0f})"}
+
+    # ── 3. per-trade size cap ─────────────────────────────────────────────────
+    if req.max_position_pct > 0 and equity > 0:
+        from risk import RiskConfig, position_margin
+        capped = position_margin(equity, req.size_usd, RiskConfig(max_position_pct=req.max_position_pct))
+    else:
+        capped = req.size_usd
+
+    # ── 4. place order (market or post-only limit) ────────────────────────────
+    if req.post_only:
+        ob = order_books.get(req.coin.upper(), {})
+        lvl = ob.get("levels", [[], []])
+        bids = lvl[0] if len(lvl) > 0 else []
+        asks = lvl[1] if len(lvl) > 1 else []
+        if bids and asks:
+            limit_px = float(bids[0]["px"]) if req.is_buy else float(asks[0]["px"])
+        else:
+            mid = float(prices.get(req.coin.lower(), 0))
+            if mid <= 0:
+                return {"ok": False, "error": f"No live price for {req.coin}"}
+            limit_px = mid * (0.9999 if req.is_buy else 1.0001)
+        result = await asyncio.to_thread(
+            hl_trader.limit_open, req.coin, req.is_buy, capped, req.leverage, limit_px
+        )
+    else:
+        result = await asyncio.to_thread(
+            hl_trader.market_open, req.coin, req.is_buy, capped, req.leverage,
+            req.slippage_tolerance_bps,
+        )
+
+    # ── 5. schedule 60-second reconciliation ─────────────────────────────────
+    if result.get("ok"):
+        asyncio.create_task(reconcile_after(req.coin, 60.0))
+
+    return result
 
 
 @app.post("/trade/hl/close")
@@ -787,18 +1006,417 @@ async def run_walkforward_endpoint(req: BacktestRequest) -> dict:
     return result
 
 
+@app.post("/backtest/agent")
+async def run_agent_backtest_endpoint(req: BacktestRequest) -> dict:
+    """Replay the trained RL policy for (coin, interval) over history → trade log + equity."""
+    from agent_backtest import run_agent_backtest
+    candle_data, coin, err = await _backtest_candles(req)
+    if err:
+        return err
+    result = await asyncio.to_thread(
+        run_agent_backtest, candle_data, coin, req.interval, req.starting_balance,
+        req.size_usd, req.leverage, req.fee_bps, req.slippage_bps, req.funding_apr, _risk_from(req),
+    )
+    if result.get("error"):
+        return result
+    split = int(len(candle_data) * 0.8)
+    result["meta"] = {
+        "coin": coin, "interval": req.interval, "strategy": "agent",
+        "candles": len(candle_data),
+        "split_time": candle_data[split]["time"] if split < len(candle_data) else 0,
+        "costs": {"fee_bps": req.fee_bps, "slippage_bps": req.slippage_bps, "funding_apr": req.funding_apr},
+    }
+    return result
+
+
+# ─── data hub endpoints (Phase 4) ────────────────────────────────────────────
+
+@app.get("/data/metrics")
+async def data_metrics_endpoint() -> dict:
+    return market_metrics
+
+
+@app.get("/data/liquidations")
+async def data_liquidations_endpoint() -> list:
+    return recent_liquidations
+
+
+@app.get("/data/funding/{coin}")
+async def data_funding_endpoint(coin: str, days: int = 7) -> list:
+    """Historical funding rates for a coin — last `days` days, hourly resolution."""
+    coin = coin.upper()
+    if coin not in COINS:
+        return []
+    start_ms = int(time.time() * 1000) - days * 24 * 3_600_000
+
+    def _fetch():
+        import urllib.request as _req
+        import json as _j
+        url = "https://api.hyperliquid.xyz/info"
+        payload = _j.dumps({"type": "fundingHistory", "coin": coin, "startTime": start_ms}).encode()
+        req = _req.Request(url, data=payload, headers={"Content-Type": "application/json"})
+        with _req.urlopen(req, timeout=15) as resp:
+            return _j.loads(resp.read())
+
+    try:
+        records = await asyncio.to_thread(_fetch)
+    except Exception as exc:
+        log.warning("Funding history fetch failed (%s): %s", coin, exc)
+        return []
+
+    return [
+        {
+            "time":         r["time"] // 1000,          # seconds for lightweight-charts
+            "funding_rate": float(r.get("fundingRate") or 0),
+            "funding_apr":  float(r.get("fundingRate") or 0) * 24 * 365 * 100,
+            "premium":      float(r.get("premium") or 0),
+        }
+        for r in records
+        if isinstance(r, dict)
+    ]
+
+
+# ─── strategy CRUD ────────────────────────────────────────────────────────────
+
+class StrategySaveRequest(BaseModel):
+    name: str
+    config: dict
+
+
+@app.post("/strategy/save")
+async def strategy_save(req: StrategySaveRequest) -> dict:
+    return _strategies.save(req.name, req.config)
+
+
+@app.get("/strategy/list")
+async def strategy_list() -> list:
+    return _strategies.list_all()
+
+
+@app.get("/strategy/{slug}")
+async def strategy_load(slug: str) -> dict:
+    data = _strategies.load(slug)
+    if data is None:
+        return {"ok": False, "error": f"Strategy '{slug}' not found"}
+    return {"ok": True, **data}
+
+
+@app.delete("/strategy/{slug}")
+async def strategy_delete(slug: str) -> dict:
+    ok = _strategies.delete(slug)
+    return {"ok": ok}
+
+
+# ─── journal endpoints (Phase 5) ─────────────────────────────────────────────
+
+class JournalCreate(BaseModel):
+    date: str  = ""
+    title: str = "Untitled"
+    body: str  = ""
+
+class JournalUpdate(BaseModel):
+    date: str  = ""
+    title: str = "Untitled"
+    body: str  = ""
+
+class JournalChatRequest(BaseModel):
+    messages:   list[dict]
+    entry_body: str = ""
+
+
+@app.get("/journal")
+async def journal_list_endpoint() -> list:
+    return await asyncio.to_thread(_db.list_entries)
+
+
+@app.get("/journal/{entry_id}")
+async def journal_get_endpoint(entry_id: int) -> dict:
+    entry = await asyncio.to_thread(_db.get_entry, entry_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Entry not found")
+    return entry
+
+
+@app.post("/journal")
+async def journal_create_endpoint(req: JournalCreate) -> dict:
+    return await asyncio.to_thread(_db.create_entry, req.date, req.title, req.body)
+
+
+@app.put("/journal/{entry_id}")
+async def journal_update_endpoint(entry_id: int, req: JournalUpdate) -> dict:
+    entry = await asyncio.to_thread(_db.update_entry, entry_id, req.date, req.title, req.body)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Entry not found")
+    return entry
+
+
+@app.delete("/journal/{entry_id}")
+async def journal_delete_endpoint(entry_id: int) -> dict:
+    ok = await asyncio.to_thread(_db.delete_entry, entry_id)
+    return {"ok": ok}
+
+
+# ── AI signal endpoints (Phase 5.5) ──────────────────────────────────────────
+
+class SignalGenerateRequest(BaseModel):
+    coin:     str = "BTC"
+    interval: str = "1h"
+
+
+@app.get("/ai/signals/all")
+async def ai_signals_all(interval: str = "1h") -> list:
+    """Latest signal per coin across ALL scanned markets (used by SignalsPage).
+    MUST be registered before /ai/signals/{coin} so FastAPI matches it first."""
+    return await asyncio.to_thread(_db.get_all_latest_signals, interval)
+
+
+@app.get("/ai/signals/{coin}")
+async def ai_signals_get(coin: str, interval: str = "1h", limit: int = 100) -> list:
+    """Return saved AI signals for a coin + interval (used as chart markers)."""
+    coin = coin.upper()
+    return await asyncio.to_thread(_db.get_signals, coin, interval, limit)
+
+
+@app.get("/markets")
+async def markets_list() -> list:
+    """All Hyperliquid perp markets sorted by 24h volume."""
+    from signal_scanner import get_markets
+    try:
+        return await get_markets()
+    except Exception as exc:
+        log.warning("Markets fetch failed: %s", exc)
+        return []
+
+
+@app.post("/ai/signals/scan")
+async def ai_signals_scan_now() -> dict:
+    """Trigger an immediate full scan (all top markets). Returns count of signals saved."""
+    from signal_scanner import run_scan
+
+    saved: list[dict] = []
+
+    async def _collect(sig: dict):
+        saved.append(sig)
+        signal_alerts.insert(0, sig)
+        del signal_alerts[50:]
+
+    asyncio.create_task(run_scan(rl_state, _collect))
+    return {"ok": True, "message": "Scan started — check /ai/signals/all in ~5 minutes"}
+
+
+@app.post("/ai/signals/generate")
+async def ai_signals_generate(req: SignalGenerateRequest) -> dict:
+    """On-demand: generate a new AI signal and save it. Returns the signal or error."""
+    from ai_signals import generate_signal
+
+    coin = req.coin.upper()
+    if coin not in COINS:
+        return {"error": f"Unknown coin: {coin}"}
+    if req.interval not in INTERVAL_MS:
+        return {"error": f"Unknown interval: {req.interval}"}
+
+    # Load candles from cache
+    launch_ms   = COIN_START_MS.get(coin, COIN_START_MS["BTC"])
+    interval_ms = INTERVAL_MS[req.interval]
+    candles = await candle_cache.get_history(
+        coin, req.interval, launch_ms, interval_ms, fetch_candles_paginated
+    )
+    if not candles:
+        return {"error": "No candle data available — cache may still be warming"}
+
+    sig = await generate_signal(coin, req.interval, candles, rl_state)
+    if not sig:
+        return {"error": "Signal generation failed — check OPENROUTER_API_KEY in server/.env"}
+
+    saved = await asyncio.to_thread(_db.save_signal, sig)
+    log.info("AI signal: %s %s → %s (%d%% conf) @ $%.2f",
+             coin, req.interval, saved["signal"], saved["confidence"], saved["price"])
+    return saved
+
+
+async def btc_eth_sol_signal_loop() -> None:
+    """
+    Scans BTC, ETH, SOL on 1h every 60 minutes with the institutional-grade
+    signal engine. High-confidence LONG/SHORT signals are pushed as WS alerts.
+    """
+    from ai_signals import generate_signal as _gen
+
+    if not os.getenv("OPENROUTER_API_KEY", "").strip():
+        log.info("Signal loop: OPENROUTER_API_KEY not set — disabled")
+        return
+
+    log.info("BTC/ETH/SOL signal loop starting (2-min warm-up)…")
+    await asyncio.sleep(120)   # wait for cache to warm
+
+    while True:
+        for coin in COINS:
+            try:
+                launch_ms   = COIN_START_MS.get(coin, COIN_START_MS["BTC"])
+                interval_ms = INTERVAL_MS["1h"]
+                candles = await candle_cache.get_history(
+                    coin, "1h", launch_ms, interval_ms, fetch_candles_paginated
+                )
+                if not candles:
+                    continue
+
+                sig = await _gen(coin, "1h", candles, rl_state)
+                if not sig:
+                    continue
+
+                # Reject HOLD and sub-75% signals
+                if sig["signal"] not in ("LONG", "SHORT"):
+                    log.debug("Signal: %s 1h → HOLD — skipped", coin)
+                    continue
+                if sig["confidence"] < 75:
+                    log.debug("Signal: %s 1h → %s %d%% below threshold — skipped",
+                              coin, sig["signal"], sig["confidence"])
+                    continue
+
+                # Dedup: skip if we already have a signal at this exact candle time
+                existing = await asyncio.to_thread(_db.get_latest_signal, coin, "1h")
+                if existing and existing.get("time") == sig.get("time") and \
+                   existing.get("signal") == sig.get("signal"):
+                    log.debug("Signal: %s 1h — same candle/direction, skipping", coin)
+                    continue
+
+                saved = await asyncio.to_thread(_db.save_signal, sig)
+                log.info("Signal: %s 1h → %s (%d%%) @ $%.2f",
+                         coin, sig["signal"], sig["confidence"], sig["price"])
+
+                signal_alerts.insert(0, saved)
+                del signal_alerts[50:]
+
+            except Exception as exc:
+                log.warning("Signal loop error (%s): %s", coin, exc)
+            await asyncio.sleep(8)   # pace between coins
+
+        await asyncio.sleep(3600)   # scan every 1 hour
+
+
+async def btc_eth_sol_4h_signal_loop() -> None:
+    """
+    4h-timeframe signal loop for BTC/ETH/SOL. Runs every 4 hours.
+    4h bars have cleaner structure and fewer false breaks than 1h.
+    """
+    from ai_signals import generate_signal as _gen
+
+    if not os.getenv("OPENROUTER_API_KEY", "").strip():
+        return
+
+    log.info("4h signal loop starting (4-min warm-up)…")
+    await asyncio.sleep(240)
+
+    while True:
+        for coin in COINS:
+            try:
+                launch_ms   = COIN_START_MS.get(coin, COIN_START_MS["BTC"])
+                interval_ms = INTERVAL_MS["4h"]
+                candles = await candle_cache.get_history(
+                    coin, "4h", launch_ms, interval_ms, fetch_candles_paginated
+                )
+                if not candles:
+                    continue
+
+                sig = await _gen(coin, "4h", candles, rl_state)
+                if not sig:
+                    continue
+
+                if sig["signal"] not in ("LONG", "SHORT"):
+                    continue
+                if sig["confidence"] < 75:
+                    continue
+
+                existing = await asyncio.to_thread(_db.get_latest_signal, coin, "4h")
+                if existing and existing.get("time") == sig.get("time") and \
+                   existing.get("signal") == sig.get("signal"):
+                    log.debug("4h Signal: %s — same candle/direction, skipping", coin)
+                    continue
+
+                saved = await asyncio.to_thread(_db.save_signal, sig)
+                log.info("4h Signal: %s → %s (%d%%) @ $%.2f",
+                         coin, sig["signal"], sig["confidence"], sig["price"])
+
+                signal_alerts.insert(0, saved)
+                del signal_alerts[50:]
+
+            except Exception as exc:
+                log.warning("4h signal loop error (%s): %s", coin, exc)
+            await asyncio.sleep(10)
+
+        await asyncio.sleep(4 * 3600)
+
+
+@app.post("/journal/chat")
+async def journal_chat_endpoint(req: JournalChatRequest) -> StreamingResponse:
+    """Stream an OpenRouter AI response with live market context injected."""
+    from openrouter import stream_chat
+
+    # Build live market context for the AI
+    ctx_lines: list[str] = []
+    for coin in COINS:
+        px = prices.get(coin)
+        if px:
+            m = market_metrics.get(coin, {})
+            chg = m.get("day_change_pct", 0)
+            sign = "+" if chg >= 0 else ""
+            ctx_lines.append(f"{coin}: ${px:,.2f} ({sign}{chg:.2f}% today)")
+    if ctx_lines:
+        ctx_lines.insert(0, "Live prices:")
+
+    action = rl_state.get("action", "HOLD")
+    probs  = rl_state.get("probabilities", {})
+    ctx_lines.append(
+        f"\nRL agent: {action}  "
+        f"(LONG {probs.get('LONG', 0):.0%} · HOLD {probs.get('HOLD', 0):.0%} · SHORT {probs.get('SHORT', 0):.0%})"
+    )
+
+    if req.entry_body.strip():
+        ctx_lines.append(f"\nJournal entry being edited:\n{req.entry_body[:2000]}")
+
+    market_context = "\n".join(ctx_lines)
+
+    async def generate():
+        async for chunk in stream_chat(req.messages, market_context=market_context):
+            yield f"data: {json.dumps({'chunk': chunk})}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+# ─── signal performance endpoints ─────────────────────────────────────────────
+
+@app.get("/signals/stats")
+async def signals_stats_endpoint() -> dict:
+    """Aggregate win/loss/pending stats for the Performance tab."""
+    return await asyncio.to_thread(_db.get_signal_stats)
+
+
+@app.get("/signals/history")
+async def signals_history_endpoint(limit: int = 50) -> list:
+    """All resolved + pending LONG/SHORT signals, newest first."""
+    import sqlite3 as _sqlite3
+    with _db._conn() as db:
+        rows = db.execute(
+            "SELECT * FROM signals WHERE signal IN ('LONG','SHORT') "
+            "ORDER BY created_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [_db._row_to_dict(r) for r in rows]
+
+
 # ─── health check ─────────────────────────────────────────────────────────────
 
 @app.get("/health")
 async def health() -> dict:
     return {
-        "status": "ok",
-        "prices": prices,
+        "status":        "ok",
+        "prices":        prices,
         "candle_counts": {c: len(candles[c]) for c in COINS},
-        "clients": len(clients),
+        "clients":       len(clients),
         "hl_configured": hl_trader is not None,
-        "rl_loaded": rl_model is not None,
-        "rl_meta": rl_meta,
+        "live_halted":   live_halted,
+        "live_peak_equity": live_peak_equity,
+        "rl_loaded":     rl_model is not None,
+        "rl_meta":       rl_meta,
     }
 
 
