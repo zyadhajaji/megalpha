@@ -89,23 +89,21 @@ class HLTrader:
         is_buy: bool,
         size_usd: float,
         leverage: int = 5,
+        slippage_tolerance_bps: float = 0.0,
     ) -> dict:
         """
         Open a position at market price.
         size_usd = USDC margin to use (server converts to coin qty via leverage).
+        slippage_tolerance_bps: if >0 and the fill deviates beyond this, logs a warning.
         """
         try:
-            # 1. Set leverage
-            lev_result = self.exchange.update_leverage(leverage, coin, is_cross=True)
-            log.debug("set leverage %dx on %s: %s", leverage, coin, lev_result)
+            self.exchange.update_leverage(leverage, coin, is_cross=True)
 
-            # 2. Get mid-price to size the order
             mids = self.info.all_mids()
             mid = float(mids.get(coin, 0))
             if mid <= 0:
                 return {"ok": False, "error": f"No price data for {coin}"}
 
-            # notional = margin × leverage;  sz = notional / price
             sz = round((size_usd * leverage) / mid, 6)
             if sz <= 0:
                 return {"ok": False, "error": "Computed size is zero"}
@@ -115,10 +113,71 @@ class HLTrader:
                 "market_open %s %s $%.0f×%dx = %.6f coins  result=%s",
                 "LONG" if is_buy else "SHORT", coin, size_usd, leverage, sz, result,
             )
-            return {"ok": True, "coin": coin, "size": sz, "result": result}
+
+            slippage_warning = None
+            if slippage_tolerance_bps > 0:
+                try:
+                    statuses = result.get("response", {}).get("data", {}).get("statuses", [])
+                    if statuses:
+                        avg_px = float((statuses[0].get("filled") or {}).get("avgPx", 0))
+                        if avg_px > 0:
+                            slip_bps = abs(avg_px - mid) / mid * 10_000
+                            if slip_bps > slippage_tolerance_bps:
+                                log.warning(
+                                    "SLIPPAGE EXCEEDED %s: fill=%.4f mid=%.4f slip=%.2fbps (tol=%.2fbps)",
+                                    coin, avg_px, mid, slip_bps, slippage_tolerance_bps,
+                                )
+                                slippage_warning = {
+                                    "fill_px": avg_px, "mid_px": mid,
+                                    "slippage_bps": round(slip_bps, 2),
+                                    "threshold_bps": slippage_tolerance_bps,
+                                }
+                except Exception:
+                    pass
+
+            out = {"ok": True, "coin": coin, "size": sz, "result": result}
+            if slippage_warning:
+                out["slippage_warning"] = slippage_warning
+            return out
 
         except Exception as exc:
             log.error("market_open error: %s", exc)
+            return {"ok": False, "error": str(exc)}
+
+    def limit_open(
+        self,
+        coin: str,
+        is_buy: bool,
+        size_usd: float,
+        leverage: int,
+        limit_px: float,
+    ) -> dict:
+        """
+        Post-only limit order at limit_px (Add Liquidity Only).
+        The order is rejected by HL if it would immediately cross the spread.
+        """
+        try:
+            self.exchange.update_leverage(leverage, coin, is_cross=True)
+
+            mids = self.info.all_mids()
+            mid = float(mids.get(coin, 0))
+            if mid <= 0:
+                return {"ok": False, "error": f"No price data for {coin}"}
+
+            sz = round((size_usd * leverage) / mid, 6)
+            if sz <= 0:
+                return {"ok": False, "error": "Computed size is zero"}
+
+            px = round(limit_px, 6)
+            result = self.exchange.order(coin, is_buy, sz, px, {"limit": {"tif": "Alo"}})
+            log.info(
+                "limit_open (ALO) %s %s $%.0f×%dx @ %.4f = %.6f coins  result=%s",
+                "LONG" if is_buy else "SHORT", coin, size_usd, leverage, px, sz, result,
+            )
+            return {"ok": True, "coin": coin, "size": sz, "price": px, "result": result}
+
+        except Exception as exc:
+            log.error("limit_open error: %s", exc)
             return {"ok": False, "error": str(exc)}
 
     def market_close(self, coin: str) -> dict:

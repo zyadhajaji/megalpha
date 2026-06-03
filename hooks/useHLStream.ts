@@ -11,6 +11,7 @@ interface HLPrices {
   btc: number;
   eth: number;
   sol: number;
+  paxg: number;
 }
 
 export interface OrderBookLevel {
@@ -59,6 +60,15 @@ export interface HLLiquidation {
   user:     string;
 }
 
+export interface RegimeCoin {
+  state:       "RANGING" | "TRENDING" | "TRANSITION" | "HALTED";
+  adx:         number;
+  bb_width:    number;
+  ma_sep:      number;
+  score:       number;
+  consecutive: number;
+}
+
 export interface HLStreamData {
   connected: boolean;
   prices: HLPrices | null;
@@ -73,6 +83,7 @@ export interface HLStreamData {
   marketMetrics: Record<string, MarketMetric> | null;
   liquidations:  HLLiquidation[];
   signalAlert:   AISignal | null;
+  regime:        Record<string, RegimeCoin> | null;
 }
 
 const EMPTY: HLStreamData = {
@@ -89,6 +100,7 @@ const EMPTY: HLStreamData = {
   marketMetrics: null,
   liquidations:  [],
   signalAlert:   null,
+  regime:        null,
 };
 
 const WS_URL           = `${BRIDGE_WS}/ws`;
@@ -143,6 +155,7 @@ export function useHLStream(): HLStreamData {
             marketMetrics: p.market_metrics  ?? null,
             liquidations:  Array.isArray(p.liquidations)  ? p.liquidations  : [],
             signalAlert:   p.signal_alert    ?? null,
+            regime:        p.regime          ?? null,
           });
         } catch {
           // ignore malformed frames

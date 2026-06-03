@@ -42,6 +42,7 @@ export default function OverviewPage({ hl, trading: _trading }: Props) {
         hlAccount={hl.hlAccount}
         connected={hl.connected}
         rlAgent={hl.rlAgent}
+        regime={hl.regime}
       />
 
       {/* Main content: left column (chart + RL) | right column (PnL + trades) */}

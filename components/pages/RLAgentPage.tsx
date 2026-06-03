@@ -77,7 +77,7 @@ export default function RLAgentPage({ hl }: { hl: HLStreamData }) {
   const history = status?.history ?? [];
   const paper = st?.paper ?? null;
   const coin = (meta.coin ?? "BTC").toLowerCase();
-  const livePx = (hl.prices as Record<string, number> | undefined)?.[coin] ?? 0;
+  const livePx = hl.prices ? (hl.prices as unknown as Record<string, number>)[coin] ?? 0 : 0;
 
   const decision = st?.last_action?.split(" ").pop() ?? "—";
   const decisionColor = decision === "LONG" ? GREEN : decision === "SHORT" ? RED : GRAY;
@@ -279,6 +279,46 @@ export default function RLAgentPage({ hl }: { hl: HLStreamData }) {
                 CONFIRM {decision}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Retrain-to-activate panel (when not loaded or no active inference) ── */}
+      {(!loaded || !st?.status) && (
+        <div className="panel" style={{
+          padding: "20px 22px",
+          border: "1px solid #cfad4e33",
+          borderLeft: "3px solid #cfad4e",
+          background: "rgba(207,173,78,0.03)",
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+            <div style={{
+              width: 8, height: 8, borderRadius: "50%",
+              background: "#cfad4e",
+            }} />
+            <div style={{ fontFamily: mono, fontSize: 11, fontWeight: 700, color: "#cfad4e", letterSpacing: "0.06em" }}>
+              RL AGENT — INFERENCE DISABLED
+            </div>
+          </div>
+          <div style={{ fontFamily: mono, fontSize: 10, color: "#888", lineHeight: 1.8, marginBottom: 16 }}>
+            The PPO model is loaded but inference is paused. The current ETH 4h model learned to HOLD (abstention).
+            Retrain to activate.
+          </div>
+          <div style={{ marginBottom: 6 }}>
+            <div style={{ fontFamily: mono, fontSize: 8, color: "#444", letterSpacing: "0.08em", marginBottom: 6 }}>
+              DEFAULT — ETH 4H · 500K STEPS
+            </div>
+            <div style={{
+              fontFamily: mono, fontSize: 11, color: "#cfad4e",
+              background: "#0c0c0c", border: "1px solid #cfad4e22",
+              borderRadius: 3, padding: "9px 14px",
+              letterSpacing: "0.02em",
+            }}>
+              python server/train_rl.py
+            </div>
+          </div>
+          <div style={{ fontFamily: mono, fontSize: 9, color: "#555", marginTop: 10 }}>
+            After training, restart the bridge to load the new policy.
           </div>
         </div>
       )}

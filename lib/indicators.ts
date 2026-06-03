@@ -152,3 +152,98 @@ export function fib(candles: Candle[]): FibLevel[] {
     color: FIB_COLORS[i],
   }));
 }
+
+// ADX — Average Directional Index (Wilder's method).
+// Returns per-bar ADX values (0-100). Needs at least 2*period candles to produce values.
+export function adx(candles: Candle[], period = 14): LinePoint[] {
+  if (candles.length < period * 2 + 1) return [];
+  const n = candles.length;
+
+  const trs: number[] = [];
+  const plusDMs: number[] = [];
+  const minusDMs: number[] = [];
+
+  for (let i = 1; i < n; i++) {
+    const high = candles[i].high;
+    const low  = candles[i].low;
+    const prevHigh  = candles[i - 1].high;
+    const prevLow   = candles[i - 1].low;
+    const prevClose = candles[i - 1].close;
+
+    const tr = Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose));
+    trs.push(tr);
+
+    const upMove   = high - prevHigh;
+    const downMove = prevLow - low;
+    const plusDM  = (upMove   > downMove && upMove   > 0) ? upMove   : 0;
+    const minusDM = (downMove > upMove   && downMove > 0) ? downMove : 0;
+    plusDMs.push(plusDM);
+    minusDMs.push(minusDM);
+  }
+
+  if (trs.length < period) return [];
+
+  let atrW  = trs.slice(0, period).reduce((a, b) => a + b, 0);
+  let pdmW  = plusDMs.slice(0, period).reduce((a, b) => a + b, 0);
+  let mdmW  = minusDMs.slice(0, period).reduce((a, b) => a + b, 0);
+
+  const dxs: number[] = [];
+  const dxTimes: number[] = [];
+
+  const computeDX = (pdm: number, mdm: number, atr: number): number => {
+    if (atr <= 0) return 0;
+    const pdi = (pdm / atr) * 100;
+    const mdi = (mdm / atr) * 100;
+    const denom = pdi + mdi;
+    return denom > 0 ? (Math.abs(pdi - mdi) / denom) * 100 : 0;
+  };
+
+  dxs.push(computeDX(pdmW, mdmW, atrW));
+  dxTimes.push(candles[period].time);
+
+  for (let i = period; i < trs.length; i++) {
+    atrW = atrW - atrW / period + trs[i];
+    pdmW = pdmW - pdmW / period + plusDMs[i];
+    mdmW = mdmW - mdmW / period + minusDMs[i];
+    dxs.push(computeDX(pdmW, mdmW, atrW));
+    dxTimes.push(candles[i + 1].time);
+  }
+
+  if (dxs.length < period) return [];
+
+  let adxVal = dxs.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  const out: LinePoint[] = [];
+
+  for (let j = period; j < dxs.length; j++) {
+    adxVal = (adxVal * (period - 1) + dxs[j]) / period;
+    out.push({ time: dxTimes[j], value: adxVal });
+  }
+
+  return out;
+}
+
+// Bollinger Band Width = (upper - lower) / middle * 100.
+// Useful for regime detection: low width = ranging, high width = trending.
+export function bbWidth(candles: Candle[], period = 20): LinePoint[] {
+  if (candles.length < period) return [];
+  const out: LinePoint[] = [];
+  for (let i = period - 1; i < candles.length; i++) {
+    let sum = 0;
+    for (let j = i - period + 1; j <= i; j++) sum += candles[j].close;
+    const m = sum / period;
+    let v = 0;
+    for (let j = i - period + 1; j <= i; j++) { const d = candles[j].close - m; v += d * d; }
+    const sd = Math.sqrt(v / period);
+    if (m > 0) {
+      const upper = m + 2 * sd;
+      const lower = m - 2 * sd;
+      out.push({ time: candles[i].time, value: (upper - lower) / m * 100 });
+    }
+  }
+  return out;
+}
+
+// Named EMA wrappers for chart display convenience.
+export function ema21(candles: Candle[]): LinePoint[] { return ema(candles, 21); }
+export function ema55(candles: Candle[]): LinePoint[] { return ema(candles, 55); }
+export function ema200(candles: Candle[]): LinePoint[] { return ema(candles, 200); }

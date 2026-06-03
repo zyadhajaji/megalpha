@@ -5,14 +5,52 @@ import { BRIDGE_HTTP } from "@/lib/bridge";
 
 type Coin      = "BTC" | "ETH" | "SOL";
 type Interval  = "15m" | "1h" | "4h" | "1d";
-type Strategy  = "momentum" | "breakout" | "mean_reversion" | "ema_cross" | "macd" | "bollinger" | "agent";
+type Strategy  =
+  | "agent"
+  | "momentum" | "breakout" | "mean_reversion" | "ema_cross" | "macd" | "bollinger"
+  | "supply_demand" | "sl_hunt" | "valued_risk"
+  | "stop_hunt_a" | "trend_follow_b" | "sniper_c" | "unified_d";
 
 interface SavedStrategy { name: string; slug: string; }
 
-const STRATEGIES: Strategy[] = ["agent", "momentum", "breakout", "mean_reversion", "ema_cross", "macd", "bollinger"];
+// Grouped for display
+const STRAT_GROUPS: { label: string; items: Strategy[] }[] = [
+  { label: "MEGA STRATEGIES", items: ["stop_hunt_a", "trend_follow_b", "sniper_c", "unified_d"] },
+  { label: "STRUCTURAL",      items: ["supply_demand", "sl_hunt", "valued_risk"] },
+  { label: "CLASSIC",         items: ["agent", "momentum", "breakout", "mean_reversion", "ema_cross", "macd", "bollinger"] },
+];
+
+const STRATEGIES: Strategy[] = [
+  "stop_hunt_a", "trend_follow_b", "sniper_c", "unified_d",
+  "supply_demand", "sl_hunt", "valued_risk",
+  "agent", "momentum", "breakout", "mean_reversion", "ema_cross", "macd", "bollinger",
+];
+
 const STRAT_LABEL: Record<Strategy, string> = {
-  agent: "🤖 RL bot", momentum: "momentum", breakout: "breakout", mean_reversion: "mean rev",
-  ema_cross: "ema cross", macd: "macd", bollinger: "bollinger",
+  // Mega strategies (from PDF)
+  stop_hunt_a:   "A · Stop Hunt",
+  trend_follow_b:"B · Trend Follow",
+  sniper_c:      "C · Sniper FU",
+  unified_d:     "D · Unified",
+  // Structural
+  supply_demand: "Supply/Demand",
+  sl_hunt:       "SL Hunt",
+  valued_risk:   "Valued Risk",
+  // Classic
+  agent:         "RL Bot",
+  momentum:      "Momentum",
+  breakout:      "Breakout",
+  mean_reversion:"Mean Rev",
+  ema_cross:     "EMA Cross",
+  macd:          "MACD",
+  bollinger:     "Bollinger",
+};
+
+const STRAT_COLOR: Partial<Record<Strategy, string>> = {
+  stop_hunt_a:    "#cfad4e",
+  trend_follow_b: "#4ecf8a",
+  sniper_c:       "#cf4e4e",
+  unified_d:      "#4e8ecf",
 };
 
 interface Trade {
@@ -329,9 +367,20 @@ export default function BacktestPage() {
           {(["15m", "1h", "4h", "1d"] as Interval[]).map((iv) => <Chip key={iv} active={interval === iv} onClick={() => setInterval(iv)}>{iv}</Chip>)}
         </ControlGroup>
         <Sep />
-        <ControlGroup label="Strategy">
-          {STRATEGIES.map((s) => <Chip key={s} active={strategy === s} onClick={() => setStrategy(s)}>{STRAT_LABEL[s]}</Chip>)}
-        </ControlGroup>
+        {STRAT_GROUPS.map((g) => (
+          <ControlGroup key={g.label} label={g.label}>
+            {g.items.map((s) => (
+              <Chip
+                key={s}
+                active={strategy === s}
+                onClick={() => setStrategy(s)}
+                color={STRAT_COLOR[s]}
+              >
+                {STRAT_LABEL[s]}
+              </Chip>
+            ))}
+          </ControlGroup>
+        ))}
         <Sep />
         <ControlGroup label="Balance"><NumInput value={balance} onChange={setBalance} prefix="$" /></ControlGroup>
         <ControlGroup label="Size/trade"><NumInput value={sizeUsd} onChange={setSizeUsd} prefix="$" /></ControlGroup>
@@ -546,13 +595,15 @@ function ControlGroup({ label, children }: { label: string; children: React.Reac
   );
 }
 
-function Chip({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
+function Chip({ active, onClick, children, color }: { active: boolean; onClick: () => void; children: React.ReactNode; color?: string }) {
+  const c = color ?? "#4e8ecf";
   return (
     <button onClick={onClick} style={{
       fontFamily: mono, fontSize: 10, padding: "3px 8px",
-      background: active ? "#101e30" : "none",
-      border: active ? "1px solid #1c3050" : "1px solid transparent",
-      borderRadius: 2, color: active ? "#4e8ecf" : "#555", cursor: "pointer",
+      background: active ? `${c}18` : "none",
+      border: active ? `1px solid ${c}55` : "1px solid transparent",
+      borderRadius: 2, color: active ? c : "#555", cursor: "pointer",
+      transition: "all 0.12s",
     }}>
       {children}
     </button>

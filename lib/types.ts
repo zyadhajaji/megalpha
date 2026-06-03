@@ -43,6 +43,19 @@ export interface Trade {
   close_time: number | null;
 }
 
+export interface AISignalSummary {
+  entry:       number;
+  stop_loss:   number;
+  take_profit: number;
+  risk_reward: string;
+  key_factors: string[];
+  reasoning:   string;
+  bias_4h?:    string;
+  session?:    string;
+  rl_action?:  string;
+  sd_zones?:   string;
+}
+
 export interface AISignal {
   id: number;
   coin: string;
@@ -55,6 +68,7 @@ export interface AISignal {
   support: number;
   resistance: number;
   created_at: number;
+  summary?: AISignalSummary;
 }
 
 export interface RLAgentState {

@@ -1,6 +1,6 @@
 "use client";
 
-export type Page = "overview" | "charts" | "backtest" | "rl-agent" | "data-hub" | "journal";
+export type Page = "overview" | "charts" | "backtest" | "rl-agent" | "data-hub" | "strategies" | "journal";
 
 interface NavItem {
   id: Page;
@@ -9,11 +9,12 @@ interface NavItem {
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { id: "overview",  label: "Overview",  symbol: "⊞" },
-  { id: "charts",    label: "Charts",    symbol: "◫" },
-  { id: "backtest",  label: "Backtest",  symbol: "◷" },
-  { id: "rl-agent",  label: "RL Agent",  symbol: "◈" },
-  { id: "data-hub",  label: "Data Hub",  symbol: "◉" },
+  { id: "overview",    label: "Overview",          symbol: "⊞" },
+  { id: "charts",      label: "Charts",            symbol: "◫" },
+  { id: "backtest",    label: "Backtest",           symbol: "◷" },
+  { id: "rl-agent",    label: "RL Agent",           symbol: "◈" },
+  { id: "data-hub",    label: "Data Hub",           symbol: "◉" },
+  { id: "strategies",  label: "Signal Command",     symbol: "◆" },
 ];
 
 const BOTTOM_ITEMS: NavItem[] = [

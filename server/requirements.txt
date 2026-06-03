@@ -4,3 +4,4 @@ websockets==14.1
 hyperliquid-python-sdk>=0.9.0
 MetaTrader5>=5.0.45
 python-dotenv>=1.0.0
+httpx>=0.27.0

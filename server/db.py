@@ -60,6 +60,15 @@ def init_db() -> None:
                 db.execute(col_sql)
             except Exception:
                 pass   # column already exists
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS paper_state (
+                id             INTEGER PRIMARY KEY,
+                equity         REAL    NOT NULL DEFAULT 10000.0,
+                positions_json TEXT    NOT NULL DEFAULT '{}',
+                trades_json    TEXT    NOT NULL DEFAULT '[]',
+                updated_at     INTEGER NOT NULL DEFAULT 0
+            )
+        """)
 
 
 # ─── CRUD ─────────────────────────────────────────────────────────────────────
@@ -194,6 +203,42 @@ def get_pending_signals() -> list[dict]:
             "SELECT * FROM signals WHERE signal IN ('LONG','SHORT') AND outcome='PENDING'"
         ).fetchall()
     return [_row_to_dict(r) for r in rows]
+
+
+# ── Paper state persistence ────────────────────────────────────────────────────
+
+def save_paper_state(equity: float, positions: dict, trades: list) -> None:
+    """Upsert the paper-trading state (always row id=1)."""
+    now = int(time.time())
+    with _conn() as db:
+        db.execute(
+            """INSERT INTO paper_state (id, equity, positions_json, trades_json, updated_at)
+               VALUES (1, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                   equity         = excluded.equity,
+                   positions_json = excluded.positions_json,
+                   trades_json    = excluded.trades_json,
+                   updated_at     = excluded.updated_at""",
+            (equity, _json.dumps(positions), _json.dumps(trades), now),
+        )
+
+
+def load_paper_state() -> "dict | None":
+    """Return {equity, positions, trades} from the persisted row, or None if absent."""
+    with _conn() as db:
+        row = db.execute("SELECT * FROM paper_state WHERE id = 1").fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    try:
+        positions = _json.loads(d.get("positions_json") or "{}")
+    except Exception:
+        positions = {}
+    try:
+        trades = _json.loads(d.get("trades_json") or "[]")
+    except Exception:
+        trades = []
+    return {"equity": float(d["equity"]), "positions": positions, "trades": trades}
 
 
 def get_signal_stats() -> dict:

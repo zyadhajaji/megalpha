@@ -7,12 +7,15 @@ interface Prices {
   btc: number;
   eth: number;
   sol: number;
+  paxg: number;
 }
 
 interface Props {
   prices: Prices | null;
   connected: boolean;
   hlAccount: HLAccount | null;
+  unreadSignals?: number;
+  onSignalBell?: () => void;
 }
 
 function PriceChip({ label, price, prevPrice }: { label: string; price: number; prevPrice: number }) {
@@ -33,7 +36,7 @@ function PriceChip({ label, price, prevPrice }: { label: string; price: number; 
   );
 }
 
-export default function Topbar({ prices, connected }: Props) {
+export default function Topbar({ prices, connected, unreadSignals = 0, onSignalBell }: Props) {
   // Render clock only after mount so SSR and client markup match (no hydration mismatch)
   const [now, setNow] = useState<string>("");
   useEffect(() => {
@@ -78,6 +81,7 @@ export default function Topbar({ prices, connected }: Props) {
           <PriceChip label="BTC" price={prices.btc} prevPrice={prices.btc * 0.988} />
           <PriceChip label="ETH" price={prices.eth} prevPrice={prices.eth * 1.003} />
           <PriceChip label="SOL" price={prices.sol} prevPrice={prices.sol * 0.992} />
+          <PriceChip label="PAXG" price={prices.paxg} prevPrice={prices.paxg * 0.997} />
         </div>
       ) : (
         <span style={{ color: "#333", fontSize: 10 }}>connecting...</span>
@@ -85,6 +89,29 @@ export default function Topbar({ prices, connected }: Props) {
 
       {/* Right side */}
       <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 14 }}>
+        {/* Signal bell */}
+        <button
+          onClick={onSignalBell}
+          title="AI Signal alerts"
+          style={{
+            position: "relative", background: "none", border: "none",
+            cursor: "pointer", padding: 0, lineHeight: 1,
+            fontSize: 13, color: unreadSignals > 0 ? "#cfad4e" : "#333",
+          }}
+        >
+          ◎
+          {unreadSignals > 0 && (
+            <span style={{
+              position: "absolute", top: -4, right: -6,
+              background: "#cf4e4e", borderRadius: "50%",
+              width: 12, height: 12, fontSize: 7,
+              display: "flex", alignItems: "center", justifyContent: "center",
+              fontFamily: "var(--font-mono)", color: "#fff", fontWeight: 700,
+            }}>
+              {unreadSignals > 9 ? "9+" : unreadSignals}
+            </span>
+          )}
+        </button>
         <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
           <div
             className="pulse-dot"
@@ -100,7 +127,7 @@ export default function Topbar({ prices, connected }: Props) {
           </span>
         </div>
         <span style={{ fontSize: 10, color: "#555" }} suppressHydrationWarning>{now ? `${now} UTC` : ""}</span>
-      </div>
+      </div>  {/* closes inner right-side flex */}
     </div>
   );
 }

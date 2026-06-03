@@ -1,18 +1,1 @@
-{
-  "version": "0.0.1",
-  "configurations": [
-    {
-      "name": "megalpha",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev"],
-      "port": 3000,
-      "autoPort": true
-    },
-    {
-      "name": "megalpha-hl-bridge",
-      "runtimeExecutable": "python",
-      "runtimeArgs": ["C:/Users/anakin/s-tier/megalpha/server/main.py"],
-      "port": 8000
-    }
-  ]
-}
+{"version":"0.0.1","configurations":[{"name":"megalpha","runtimeExecutable":"npm","runtimeArgs":["run","dev"],"port":3000}]}

@@ -1,11 +1,13 @@
 "use client";
 
 import type { HLAccount, RLAgentState } from "@/lib/types";
+import type { RegimeCoin } from "@/hooks/useHLStream";
 
 interface Props {
   hlAccount: HLAccount | null;
   connected: boolean;
-  rlAgent: RLAgentState | null;
+  rlAgent:   RLAgentState | null;
+  regime?:   Record<string, RegimeCoin> | null;
 }
 
 function StatCard({ label, value, sub, valueColor }: {
@@ -40,7 +42,11 @@ function StatCard({ label, value, sub, valueColor }: {
   );
 }
 
-export default function HeroRow({ hlAccount, connected, rlAgent }: Props) {
+const REGIME_COLOR: Record<string, string> = {
+  TRENDING: "#4ecf8a", RANGING: "#cfad4e", TRANSITION: "#555", HALTED: "#cf4e4e"
+};
+
+export default function HeroRow({ hlAccount, connected, rlAgent, regime }: Props) {
   const equity = hlAccount
     ? `$${hlAccount.account_value.toLocaleString("en-US", { maximumFractionDigits: 0 })}`
     : connected ? "—" : "Offline";
@@ -89,12 +95,44 @@ export default function HeroRow({ hlAccount, connected, rlAgent }: Props) {
         sub={posSub}
         valueColor={position ? (position.is_long ? "#4ecf8a" : "#cf4e4e") : "#333"}
       />
-      <StatCard
-        label="Backtest · BTC 1H"
-        value="—"
-        sub="run a backtest in Phase 2"
-        valueColor="#333"
-      />
+      {/* Regime card — live if available, placeholder otherwise */}
+      {regime ? (
+        <div className="panel" style={{ padding: "10px 14px", flex: 1 }}>
+          <div style={{ fontSize: 9, color: "#333", letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 6 }}>
+            Market Regime
+          </div>
+          <div style={{ display: "flex", gap: 10, marginBottom: 4 }}>
+            {["BTC", "ETH", "SOL"].map(c => {
+              const r = regime[c];
+              if (!r) return null;
+              const col = REGIME_COLOR[r.state] ?? "#555";
+              return (
+                <div key={c} style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+                  <span style={{ fontSize: 8, color: "#333" }}>{c}</span>
+                  <span style={{
+                    fontFamily: "var(--font-mono, 'IBM Plex Mono', monospace)",
+                    fontSize: 10, fontWeight: 700, color: col,
+                  }}>{r.state.slice(0, 5)}</span>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ fontSize: 9, color: "#444" }}>
+            {["BTC", "ETH", "SOL"].map(c => regime[c]?.state === "TRENDING").filter(Boolean).length >= 2
+              ? "Strategy B active — trend follow"
+              : ["BTC", "ETH", "SOL"].map(c => regime[c]?.state === "RANGING").filter(Boolean).length >= 2
+              ? "Strategy A active — stop hunt"
+              : "Mixed regime — Strategy D preferred"}
+          </div>
+        </div>
+      ) : (
+        <StatCard
+          label="Market Regime"
+          value="—"
+          sub="loading regime detection…"
+          valueColor="#333"
+        />
+      )}
     </div>
   );
 }

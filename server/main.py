@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -25,9 +26,14 @@ from pydantic import BaseModel
 import candle_cache
 import strategies as _strategies
 import db as _db
+from telegram_notifier import send as _tg
+from ai_signals import SIGNAL_CONFIDENCE_FLOOR
 
 # ── signal alert state (populated by scanner_loop, broadcast via WS) ─────────
 signal_alerts: list[dict] = []   # most recent first, capped at 50
+
+# ── regime detection state (updated every 30 min from 4h candle cache) ───────
+regime_states: dict[str, dict] = {}   # keyed by coin e.g. "BTC" → {state, adx, ...}
 # ─── env / logging ────────────────────────────────────────────────────────────
 
 load_dotenv(Path(__file__).parent / ".env")
@@ -49,6 +55,28 @@ if HL_PRIVATE_KEY and HL_PRIVATE_KEY != "0xyour_private_key_here":
     except Exception as exc:
         log.warning("HL trader disabled: %s", exc)
 
+# ─── optional MT5 bridge ─────────────────────────────────────────────────────
+
+mt5_bridge = None
+mt5_auto_trader = None
+
+MT5_LOGIN    = int(os.getenv("MT5_LOGIN", "0"))
+MT5_PASSWORD = os.getenv("MT5_PASSWORD", "")
+MT5_SERVER   = os.getenv("MT5_SERVER", "")
+
+if MT5_LOGIN and MT5_PASSWORD and MT5_SERVER:
+    try:
+        from mt5_bridge import MT5Bridge
+        from mt5_auto_trader import MT5AutoTrader
+        mt5_bridge = MT5Bridge(MT5_LOGIN, MT5_PASSWORD, MT5_SERVER)
+        _mt5_info  = mt5_bridge.get_account_info()
+        _mt5_equity = float(_mt5_info.get("equity", 100.0))
+        mt5_auto_trader = MT5AutoTrader(mt5_bridge, account_equity=_mt5_equity)
+        log.info("MT5 bridge initialized — equity=%.2f %s",
+                 _mt5_equity, _mt5_info.get("currency", ""))
+    except Exception as exc:
+        log.warning("MT5 bridge disabled: %s", exc)
+
 # ─── constants ────────────────────────────────────────────────────────────────
 
 HL_WS_URL          = "wss://api.hyperliquid.xyz/ws"
@@ -57,9 +85,10 @@ HL_WS_URL          = "wss://api.hyperliquid.xyz/ws"
 
 # Hyperliquid asset launch timestamps (milliseconds)
 COIN_START_MS: dict[str, int] = {
-    "BTC": 1668124800000,   # Nov 11 2022
-    "ETH": 1669766400000,   # Nov 30 2022
-    "SOL": 1672531200000,   # Jan  1 2023
+    "BTC":  1668124800000,   # Nov 11 2022
+    "ETH":  1669766400000,   # Nov 30 2022
+    "SOL":  1672531200000,   # Jan  1 2023
+    "PAXG": 1706745600000,   # Feb  1 2024 (PAX Gold — tracks physical gold price, HL perp)
 }
 
 INTERVAL_MS: dict[str, int] = {
@@ -80,13 +109,13 @@ INTERVAL_MS: dict[str, int] = {
 }
 
 HL_MAX_CANDLES_PER_REQUEST = 500
-COINS              = ["BTC", "ETH", "SOL"]
+COINS              = ["BTC", "ETH", "SOL", "PAXG"]
 BROADCAST_INTERVAL = 0.5   # seconds — market data push cadence
 ACCOUNT_POLL_SECS  = 5.0   # seconds — account state refresh cadence
 
 # ─── shared in-memory state ───────────────────────────────────────────────────
 
-prices: dict[str, float]           = {"btc": 0.0, "eth": 0.0, "sol": 0.0}
+prices: dict[str, float]           = {"btc": 0.0, "eth": 0.0, "sol": 0.0, "paxg": 0.0}
 candles: dict[str, list]           = {c: [] for c in COINS}
 open_candle: dict[str, Optional[dict]] = {c: None for c in COINS}
 price_history: dict[str, list[float]]  = {c: [] for c in COINS}
@@ -116,6 +145,32 @@ rl_history: list = []        # rolling path: [{t, price, position, equity}]
 rl_paper: dict = {"position": 0, "entry_px": 0.0, "realized": 0.0,
                   "trades": 0, "wins": 0, "peak": 0.0, "max_dd": 0.0}
 RL_HISTORY_MAX = 180
+
+# ─── auto-execution state ─────────────────────────────────────────────────────
+# mode: "stopped" (no auto trades) | "paper" (sim only) | "live" (real HL orders)
+auto_exec_mode: str  = "stopped"
+auto_exec_log:  list = []          # recent executions, newest first, capped 100
+auto_exec_next_scan: float = 0.0   # unix timestamp of next scheduled scan
+
+PAPER_START_EQUITY   = 10_000.0
+AUTO_EXEC_SIZE_USD   = 50.0        # USD per auto trade (HL)
+AUTO_EXEC_LEVERAGE   = 5
+AUTO_EXEC_SCAN_COINS = ["BTC", "ETH", "SOL", "PAXG"]
+
+# Broker routing: "hl" | "mt5" | "both"
+auto_exec_broker: str = os.getenv("AUTO_EXEC_BROKER", "hl")
+
+# MT5 coin → broker symbol map (PAXG tracks gold → XAUUSD on most CFD brokers)
+_MT5_COIN_MAP: dict[str, str] = {
+    "BTC":  os.getenv("MT5_SYMBOL_BTC",  "BTCUSD"),
+    "ETH":  os.getenv("MT5_SYMBOL_ETH",  "ETHUSD"),
+    "SOL":  os.getenv("MT5_SYMBOL_SOL",  "SOLUSD"),
+    "PAXG": os.getenv("MT5_SYMBOL_PAXG", "XAUUSD"),
+}
+
+paper_equity:    float = PAPER_START_EQUITY
+paper_positions: dict  = {}   # coin → {direction, entry, sl, tp, size_usd, leverage, opened_at, strategy}
+paper_trades:    list  = []   # closed paper trades, newest first, capped 50
 
 # ─── candle builder ───────────────────────────────────────────────────────────
 
@@ -465,11 +520,61 @@ def build_payload() -> dict:
         payload["liquidations"] = recent_liquidations[-30:]
     if signal_alerts:
         payload["signal_alert"] = signal_alerts[0]   # latest alert only
+    if regime_states:
+        payload["regime"] = regime_states
+    payload["auto_exec"] = {
+        "mode":      auto_exec_mode,
+        "next_scan": auto_exec_next_scan,
+        "paper": {
+            "equity":    round(paper_equity, 2),
+            "pnl":       round(paper_equity - PAPER_START_EQUITY, 2),
+            "positions": paper_positions,
+        },
+    }
     return payload
 
 # ─── FastAPI app ──────────────────────────────────────────────────────────────
 
-app = FastAPI(title="MEGALPHA Bridge")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # startup
+    global paper_equity, paper_positions, paper_trades
+    _db.init_db()
+    state = _db.load_paper_state()
+    if state:
+        paper_equity    = state["equity"]
+        paper_positions = state["positions"]
+        paper_trades    = state["trades"]
+        log.info("Paper state restored — equity=%.2f, positions=%d",
+                 paper_equity, len(paper_positions))
+    load_rl_policy()
+    asyncio.create_task(fetch_historical_candles())
+    asyncio.create_task(hl_listener())
+    asyncio.create_task(broadcaster())
+    asyncio.create_task(account_poller())
+    asyncio.create_task(prewarm_history_cache())
+    # rl_inference_loop disabled — RL model HOLDs 99% of the time; retrain before re-enabling
+    asyncio.create_task(market_metrics_poller())
+    asyncio.create_task(btc_eth_sol_signal_loop())
+    asyncio.create_task(btc_eth_sol_4h_signal_loop())
+    asyncio.create_task(regime_detection_loop())
+    asyncio.create_task(auto_exec_loop())
+
+    from outcome_checker import outcome_checker_loop as _outcome_loop
+
+    async def _candle_history(coin: str, interval: str) -> list[dict]:
+        launch_ms   = COIN_START_MS.get(coin, COIN_START_MS["BTC"])
+        interval_ms = INTERVAL_MS.get(interval, INTERVAL_MS["1h"])
+        return await candle_cache.get_history(
+            coin, interval, launch_ms, interval_ms, fetch_candles_paginated
+        )
+
+    asyncio.create_task(_outcome_loop(_candle_history))
+    yield
+    # shutdown (nothing needed currently)
+
+
+app = FastAPI(title="MEGALPHA Bridge", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+",  # any local dev port
@@ -480,19 +585,32 @@ app.add_middleware(
 
 # ─── background tasks ─────────────────────────────────────────────────────────
 
+# Coins that support HL WS trades/l2Book subscriptions (GOLD candle API returns 500)
+HL_TRADEABLE_COINS = ["BTC", "ETH", "SOL"]
+
+
 async def hl_listener() -> None:
-    backoff = 1.0   # exponential reconnect backoff (1s → 30s cap), reset on connect
+    backoff    = 1.0    # exponential reconnect backoff (1s → 30s cap)
+    connect_ts = 0.0    # time of last successful connect
+
     while True:
         try:
             async with websockets.connect(
-                HL_WS_URL, ping_interval=20, ping_timeout=30, open_timeout=15
+                HL_WS_URL,
+                ping_interval=None,   # HL manages its own heartbeat; our pings cause drops
+                open_timeout=15,
             ) as ws:
+                connect_ts = time.time()
                 log.info("Connected to Hyperliquid WS")
-                backoff = 1.0
+
+                # Subscribe allMids (prices for all coins including GOLD)
                 await ws.send(json.dumps({"method": "subscribe", "subscription": {"type": "allMids"}}))
-                for coin in COINS:
+
+                # trades + l2Book only for supported coins
+                for coin in HL_TRADEABLE_COINS:
                     await ws.send(json.dumps({"method": "subscribe", "subscription": {"type": "trades",  "coin": coin}}))
                     await ws.send(json.dumps({"method": "subscribe", "subscription": {"type": "l2Book", "coin": coin}}))
+
                 if hl_trader:
                     await ws.send(json.dumps({"method": "subscribe", "subscription": {"type": "userFills", "user": hl_trader.address}}))
                     await ws.send(json.dumps({"method": "subscribe", "subscription": {"type": "webData2",  "user": hl_trader.address}}))
@@ -505,7 +623,7 @@ async def hl_listener() -> None:
 
                         if ch == "allMids":
                             mids = data.get("mids", {})
-                            for k, v in [("BTC", "btc"), ("ETH", "eth"), ("SOL", "sol")]:
+                            for k, v in [("BTC", "btc"), ("ETH", "eth"), ("SOL", "sol"), ("PAXG", "paxg")]:
                                 if k in mids:
                                     prices[v] = float(mids[k])
 
@@ -558,7 +676,12 @@ async def hl_listener() -> None:
                         log.debug("WS parse error: %s", exc)
 
         except Exception as exc:
-            log.warning("HL WS disconnected (%s), reconnecting in %.0fs", exc, backoff)
+            uptime = time.time() - connect_ts
+            # Only reset backoff if connection was stable (>10s); otherwise keep backing off
+            if uptime > 10:
+                backoff = 1.0
+            log.warning("HL WS disconnected after %.0fs (%s), reconnecting in %.0fs",
+                        uptime, exc, backoff)
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 30.0)
 
@@ -663,6 +786,32 @@ async def market_metrics_poller() -> None:
         await asyncio.sleep(30)
 
 
+async def regime_detection_loop() -> None:
+    """
+    Compute market regime for each coin every 30 minutes from 4h cached candles.
+    Stores results in global regime_states dict (broadcast via WS payload).
+    """
+    await asyncio.sleep(15)   # brief warm-up after startup
+    while True:
+        for coin in COINS:
+            try:
+                launch_ms   = COIN_START_MS.get(coin, COIN_START_MS["BTC"])
+                interval_ms = INTERVAL_MS["4h"]
+                candle_data = await candle_cache.get_history(
+                    coin, "4h", launch_ms, interval_ms, fetch_candles_paginated
+                )
+                if not candle_data or len(candle_data) < 60:
+                    continue
+                from strategies_mega import detect_regime as _detect_regime
+                regime = await asyncio.to_thread(_detect_regime, candle_data)
+                regime_states[coin] = regime
+                log.debug("Regime [%s]: %s (ADX=%.1f score=%.2f)", coin, regime["state"], regime["adx"], regime["score"])
+            except Exception as exc:
+                log.debug("Regime detection error (%s): %s", coin, exc)
+            await asyncio.sleep(2)
+        await asyncio.sleep(30 * 60)   # re-evaluate every 30 minutes
+
+
 async def reconcile_after(coin: str, delay_secs: float = 60.0) -> None:
     """Post-trade reconciliation: refresh account state after delay and log the position."""
     await asyncio.sleep(delay_secs)
@@ -730,30 +879,269 @@ async def prewarm_history_cache() -> None:
                 log.warning("Cache warm failed (%s %s): %s", coin, interval, exc)
 
 
-@app.on_event("startup")
-async def startup() -> None:
-    _db.init_db()
-    load_rl_policy()
-    asyncio.create_task(fetch_historical_candles())
-    asyncio.create_task(hl_listener())
-    asyncio.create_task(broadcaster())
-    asyncio.create_task(account_poller())
-    asyncio.create_task(prewarm_history_cache())
-    asyncio.create_task(rl_inference_loop())
-    asyncio.create_task(market_metrics_poller())
-    asyncio.create_task(btc_eth_sol_signal_loop())
-    asyncio.create_task(btc_eth_sol_4h_signal_loop())
+# ─── auto-execution engine ────────────────────────────────────────────────────
 
-    from outcome_checker import outcome_checker_loop as _outcome_loop
+def _check_paper_sl_tp() -> None:
+    """Check open paper positions against live prices; close on SL or TP hit."""
+    global paper_equity, paper_positions, paper_trades
+    for coin in list(paper_positions.keys()):
+        pos = paper_positions[coin]
+        current = prices.get(coin.lower(), 0.0)
+        if not current:
+            continue
+        is_long = pos["direction"] == "LONG"
+        hit_sl  = (is_long and current <= pos["sl"]) or (not is_long and current >= pos["sl"])
+        hit_tp  = (is_long and current >= pos["tp"]) or (not is_long and current <= pos["tp"])
+        if not (hit_sl or hit_tp):
+            continue
+        exit_px  = pos["sl"] if hit_sl else pos["tp"]
+        pnl_pct  = (exit_px - pos["entry"]) / (pos["entry"] + 1e-9) * (1 if is_long else -1)
+        pnl_usd  = pos["size_usd"] * pnl_pct * pos.get("leverage", AUTO_EXEC_LEVERAGE)
+        paper_equity += pnl_usd
+        trade = {
+            "coin":      coin,
+            "direction": pos["direction"],
+            "entry":     pos["entry"],
+            "exit":      round(exit_px, 6),
+            "sl":        pos["sl"],
+            "tp":        pos["tp"],
+            "pnl_usd":   round(pnl_usd, 2),
+            "result":    "TP" if hit_tp else "SL",
+            "opened_at": pos["opened_at"],
+            "closed_at": int(time.time()),
+            "strategy":  pos.get("strategy", "?"),
+        }
+        paper_trades.insert(0, trade)
+        if len(paper_trades) > 50:
+            paper_trades.pop()
+        del paper_positions[coin]
+        log.info("Paper %s %s %s — PnL $%.2f (equity $%.2f)",
+                 trade["result"], coin, pos["direction"], pnl_usd, paper_equity)
 
-    async def _candle_history(coin: str, interval: str) -> list[dict]:
+
+async def _auto_exec_coin(coin: str, interval: str) -> None:
+    """Run strategy scan for one coin; execute if ≥2 strategies agree."""
+    global auto_exec_log, live_peak_equity, paper_equity, paper_positions
+
+    try:
+        # Skip if already in a paper position for this coin
+        if auto_exec_mode == "paper" and coin in paper_positions:
+            return
+
+        # Live mode pre-checks (per broker)
+        acct = {}  # HL account state, populated below if needed
+        if auto_exec_mode == "live":
+            if auto_exec_broker in ("hl", "both"):
+                if live_halted:
+                    return
+                if hl_trader:
+                    acct = await asyncio.to_thread(hl_trader.get_account_state)
+                    if next((p for p in acct.get("positions", [])
+                             if p["coin"] == coin.upper()), None):
+                        return  # already in HL position for this coin
+
+        # Load candles from cache
         launch_ms   = COIN_START_MS.get(coin, COIN_START_MS["BTC"])
         interval_ms = INTERVAL_MS.get(interval, INTERVAL_MS["1h"])
-        return await candle_cache.get_history(
+        candle_data = await candle_cache.get_history(
             coin, interval, launch_ms, interval_ms, fetch_candles_paginated
         )
+        candle_4h = await candle_cache.get_history(
+            coin, "4h", launch_ms, INTERVAL_MS["4h"], fetch_candles_paginated
+        )
+        if len(candle_data) < 55:
+            return
 
-    asyncio.create_task(_outcome_loop(_candle_history))
+        # Run all 4 strategies in a thread
+        from strategies_mega import (
+            score_strategy_a, signal_strategy_b,
+            detect_fu_candle, score_strategy_d,
+        )
+
+        def _run():
+            return {
+                "A": score_strategy_a(candle_data, coin),
+                "B": signal_strategy_b(candle_data, candle_4h) if len(candle_4h) >= 60 else None,
+                "C": detect_fu_candle(candle_data),
+                "D": score_strategy_d(candle_data, coin),
+            }
+
+        results = await asyncio.to_thread(_run)
+
+        # Compute consensus
+        longs  = [k for k, v in results.items() if v and v.get("direction") == "long"]
+        shorts = [k for k, v in results.items() if v and v.get("direction") == "short"]
+
+        if len(longs) >= 2:
+            direction, winners = "LONG", longs
+        elif len(shorts) >= 2:
+            direction, winners = "SHORT", shorts
+        else:
+            return  # no consensus
+
+        # Optional triple-gate: require AI signal to agree before executing
+        if os.getenv("REQUIRE_AI_CONFIRM", "0") == "1":
+            recent_sig = await asyncio.to_thread(_db.get_latest_signal, coin, interval)
+            if not recent_sig:
+                log.info("Auto-exec %s %s: no AI signal yet — skipping", coin, direction)
+                return
+            sig_age = time.time() - recent_sig.get("created_at", 0)
+            if recent_sig.get("signal") != direction or sig_age > 7200:  # 2h max age
+                log.info("Auto-exec %s %s: AI signal disagrees or stale (%s, age=%.0fs) — skipping",
+                         coin, direction, recent_sig.get("signal"), sig_age)
+                return
+            log.info("Auto-exec %s %s: AI+strategy consensus confirmed — executing", coin, direction)
+
+        # Pick best signal (highest score or rr)
+        best_key, best_result = sorted(
+            [(k, results[k]) for k in winners],
+            key=lambda x: x[1].get("score", x[1].get("rr", 0) or 0),
+            reverse=True,
+        )[0]
+
+        entry = float(best_result.get("entry") or 0)
+        sl    = float(best_result.get("sl")    or 0)
+        tp    = float(best_result.get("tp1")   or 0)
+
+        if not entry or not sl or not tp:
+            return
+
+        outcome: dict = {}
+
+        if auto_exec_mode == "paper":
+            paper_positions[coin] = {
+                "direction": direction,
+                "entry":     entry,
+                "sl":        sl,
+                "tp":        tp,
+                "size_usd":  AUTO_EXEC_SIZE_USD,
+                "leverage":  AUTO_EXEC_LEVERAGE,
+                "opened_at": int(time.time()),
+                "strategy":  ",".join(winners),
+            }
+            outcome = {"ok": True, "mode": "paper"}
+            log.info("Auto-exec PAPER %s %s @%.4f [%s]", direction, coin, entry, ",".join(winners))
+            asyncio.create_task(_save_paper())
+            asyncio.create_task(_tg(
+                f"<b>Auto-exec PAPER</b> {coin} {direction} @${entry:,.4f}\n"
+                f"SL ${sl:,.4f} | TP ${tp:,.4f} | Strategies: {','.join(winners)}"
+            ))
+
+        elif auto_exec_mode == "live":
+            outcomes: list[dict] = []
+
+            # ── Hyperliquid ────────────────────────────────────────────────
+            if auto_exec_broker in ("hl", "both") and hl_trader and not live_halted:
+                hl_eq = float(acct.get("account_value") or 0)
+                if hl_eq > 0:
+                    live_peak_equity = max(live_peak_equity, hl_eq)
+                ob   = order_books.get(coin.upper(), {})
+                lvls = ob.get("levels", [[], []])
+                bids, asks = lvls[0], lvls[1]
+                limit_px = (float(bids[0]["px"]) if direction == "LONG" else float(asks[0]["px"])) \
+                           if (bids and asks) else entry
+                hl_res = await asyncio.to_thread(
+                    hl_trader.limit_open, coin, direction == "LONG",
+                    AUTO_EXEC_SIZE_USD, AUTO_EXEC_LEVERAGE, limit_px
+                )
+                log.info("Auto-exec HL %s %s @%.4f → %s", direction, coin, limit_px, hl_res)
+                outcomes.append(hl_res)
+                if hl_res.get("ok"):
+                    asyncio.create_task(_tg(
+                        f"<b>Auto-exec HL</b> {coin} {direction} @${limit_px:,.4f}\n"
+                        f"SL ${sl:,.4f} | TP ${tp:,.4f} | {','.join(winners)}"
+                    ))
+
+            # ── MT5 / VT Markets ───────────────────────────────────────────
+            if auto_exec_broker in ("mt5", "both") and mt5_bridge:
+                mt5_sym = _MT5_COIN_MAP.get(coin.upper(), coin.upper() + "USD")
+                # Skip if already in a position on this symbol
+                existing_mt5 = await asyncio.to_thread(mt5_bridge.get_positions)
+                if not any(p["symbol"] == mt5_sym for p in existing_mt5):
+                    # Phase-based risk sizing (minimum 0.01 lots)
+                    try:
+                        from strategies_mega import detect_phase
+                        mt5_info = await asyncio.to_thread(mt5_bridge.get_account_info)
+                        # Convert broker equity to USD estimate (CAD account: ~0.73 rate)
+                        broker_eq  = float(mt5_info.get("equity", 100.0))
+                        eq_usd     = broker_eq * float(os.getenv("MT5_FX_RATE", "0.73"))
+                        phase      = detect_phase(eq_usd)
+                        risk_usd   = eq_usd * phase["risk_pct"]
+                        sl_dist    = abs(entry - sl) / (entry + 1e-9)
+                        lot        = round(risk_usd / (sl_dist * entry + 1e-9), 2)
+                        lot        = max(0.01, min(lot, float(os.getenv("MT5_MAX_LOT", "0.10"))))
+                    except Exception:
+                        lot = 0.01
+                    tag = f"MEGALPHA_{','.join(winners)}"
+                    mt5_res = await asyncio.to_thread(
+                        mt5_bridge.market_order,
+                        coin, direction == "LONG", lot, sl, tp, tag
+                    )
+                    log.info("Auto-exec MT5 %s %s sym=%s lot=%.2f → %s",
+                             direction, coin, mt5_sym, lot, mt5_res)
+                    outcomes.append(mt5_res)
+                    if mt5_res.get("ok"):
+                        asyncio.create_task(_tg(
+                            f"<b>Auto-exec MT5</b> {coin} {direction} lot={lot:.2f}\n"
+                            f"SL ${sl:,.4f} | TP ${tp:,.4f} | {','.join(winners)}"
+                        ))
+
+            outcome = outcomes[0] if outcomes else {"ok": False, "error": "No broker available or all skipped"}
+
+        # Log the execution
+        auto_exec_log.insert(0, {
+            "ts":         int(time.time()),
+            "coin":       coin,
+            "interval":   interval,
+            "direction":  direction,
+            "entry":      round(entry, 4),
+            "sl":         round(sl, 4),
+            "tp":         round(tp, 4),
+            "strategies": winners,
+            "mode":       auto_exec_mode,
+            "ok":         outcome.get("ok", False),
+            "error":      outcome.get("error"),
+        })
+        if len(auto_exec_log) > 100:
+            auto_exec_log.pop()
+
+    except Exception as exc:
+        log.warning("auto_exec_coin(%s %s) error: %s", coin, interval, exc)
+
+
+async def _save_paper() -> None:
+    """Persist current paper-trading state to SQLite in a background thread."""
+    await asyncio.to_thread(_db.save_paper_state, paper_equity, paper_positions, paper_trades)
+
+
+async def auto_exec_loop() -> None:
+    """Background loop: scans on every 1h candle close; executes on consensus."""
+    global auto_exec_next_scan
+    await asyncio.sleep(90)   # wait for cache prewarm before first scan
+
+    while True:
+        try:
+            now = time.time()
+
+            # Always check paper SL/TP regardless of mode
+            if paper_positions:
+                _check_paper_sl_tp()
+                asyncio.create_task(_save_paper())
+
+            # Run scan when the scheduled time arrives
+            if now >= auto_exec_next_scan and auto_exec_mode != "stopped":
+                # Schedule next scan at top of next hour
+                auto_exec_next_scan = (int(now) // 3600 + 1) * 3600.0
+                log.info("Auto-exec scan starting (mode=%s)", auto_exec_mode)
+                for coin in AUTO_EXEC_SCAN_COINS:
+                    await _auto_exec_coin(coin, "1h")
+
+        except Exception as exc:
+            log.warning("auto_exec_loop error: %s", exc)
+
+        await asyncio.sleep(60)  # tick every minute
+
+
 
 # ─── WebSocket endpoint ───────────────────────────────────────────────────────
 
@@ -1263,11 +1651,11 @@ async def btc_eth_sol_signal_loop() -> None:
                 if not sig:
                     continue
 
-                # Reject HOLD and sub-75% signals
+                # Reject HOLD and sub-floor signals
                 if sig["signal"] not in ("LONG", "SHORT"):
                     log.debug("Signal: %s 1h → HOLD — skipped", coin)
                     continue
-                if sig["confidence"] < 75:
+                if sig["confidence"] < SIGNAL_CONFIDENCE_FLOOR:
                     log.debug("Signal: %s 1h → %s %d%% below threshold — skipped",
                               coin, sig["signal"], sig["confidence"])
                     continue
@@ -1282,6 +1670,10 @@ async def btc_eth_sol_signal_loop() -> None:
                 saved = await asyncio.to_thread(_db.save_signal, sig)
                 log.info("Signal: %s 1h → %s (%d%%) @ $%.2f",
                          coin, sig["signal"], sig["confidence"], sig["price"])
+                asyncio.create_task(_tg(
+                    f"📡 <b>{coin} {sig['signal']}</b> {sig['confidence']}% @ ${sig['price']:,.0f}\n"
+                    f"{sig.get('reasoning','')[:200]}"
+                ))
 
                 signal_alerts.insert(0, saved)
                 del signal_alerts[50:]
@@ -1323,7 +1715,7 @@ async def btc_eth_sol_4h_signal_loop() -> None:
 
                 if sig["signal"] not in ("LONG", "SHORT"):
                     continue
-                if sig["confidence"] < 75:
+                if sig["confidence"] < SIGNAL_CONFIDENCE_FLOOR:
                     continue
 
                 existing = await asyncio.to_thread(_db.get_latest_signal, coin, "4h")
@@ -1385,6 +1777,22 @@ async def journal_chat_endpoint(req: JournalChatRequest) -> StreamingResponse:
 
 # ─── signal performance endpoints ─────────────────────────────────────────────
 
+@app.get("/signals/debug")
+async def signals_debug() -> dict:
+    """Returns the last 10 saved signals including HOLD ones, for debugging AI output."""
+    try:
+        import sqlite3
+        conn = sqlite3.connect(str(_db.DB_PATH))
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM signals ORDER BY created_at DESC LIMIT 10"
+        ).fetchall()
+        conn.close()
+        return {"signals": [dict(r) for r in rows]}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
 @app.get("/signals/stats")
 async def signals_stats_endpoint() -> dict:
     """Aggregate win/loss/pending stats for the Performance tab."""
@@ -1428,6 +1836,244 @@ async def rl_status() -> dict:
         "state":   rl_state,
         "history": rl_history,
     }
+
+
+# ─── regime endpoints ─────────────────────────────────────────────────────────
+
+@app.get("/regime")
+async def regime_endpoint() -> dict:
+    """Current market regime for all coins (RANGING / TRENDING / TRANSITION / HALTED)."""
+    return regime_states
+
+
+# ─── auto-execution endpoints ─────────────────────────────────────────────────
+
+@app.get("/auto-exec/status")
+async def auto_exec_status_endpoint() -> dict:
+    now = time.time()
+    return {
+        "mode":           auto_exec_mode,
+        "broker":         auto_exec_broker,
+        "hl_configured":  hl_trader is not None,
+        "mt5_configured": mt5_bridge is not None,
+        "live_halted":    live_halted,
+        "next_scan_ts":   auto_exec_next_scan,
+        "secs_to_scan":   max(0, int(auto_exec_next_scan - now)),
+        "log":            auto_exec_log[:20],
+        "paper": {
+            "equity":    round(paper_equity, 2),
+            "start":     PAPER_START_EQUITY,
+            "pnl":       round(paper_equity - PAPER_START_EQUITY, 2),
+            "positions": paper_positions,
+            "trades":    paper_trades[:20],
+        },
+    }
+
+
+class AutoExecModeRequest(BaseModel):
+    mode: str   # "stopped" | "paper" | "live"
+
+
+class AutoExecBrokerRequest(BaseModel):
+    broker: str   # "hl" | "mt5" | "both"
+
+
+@app.post("/auto-exec/broker")
+async def set_auto_exec_broker(req: AutoExecBrokerRequest) -> dict:
+    global auto_exec_broker
+    if req.broker not in ("hl", "mt5", "both"):
+        return {"ok": False, "error": "broker must be 'hl', 'mt5', or 'both'"}
+    if req.broker in ("mt5", "both") and not mt5_bridge:
+        return {"ok": False, "error": "MT5 not connected — set MT5_LOGIN/PASSWORD/SERVER in .env"}
+    auto_exec_broker = req.broker
+    log.info("Auto-exec broker set to: %s", req.broker)
+    return {"ok": True, "broker": auto_exec_broker}
+
+
+@app.post("/auto-exec/mode")
+async def set_auto_exec_mode(req: AutoExecModeRequest) -> dict:
+    global auto_exec_mode, auto_exec_next_scan
+    if req.mode not in ("stopped", "paper", "live"):
+        return {"ok": False, "error": "mode must be 'stopped', 'paper', or 'live'"}
+    if req.mode == "live" and not hl_trader:
+        return {"ok": False, "error": "HL_PRIVATE_KEY not configured — live mode unavailable"}
+    if req.mode == "live" and live_halted:
+        return {"ok": False, "error": "Max-drawdown kill-switch active — restart bridge to reset"}
+    auto_exec_mode = req.mode
+    # Trigger an immediate scan when switching to an active mode
+    if req.mode != "stopped":
+        auto_exec_next_scan = time.time()
+    log.info("Auto-exec mode set to: %s", req.mode)
+    return {"ok": True, "mode": auto_exec_mode}
+
+
+# ─── MT5 endpoints ────────────────────────────────────────────────────────────
+
+class MT5OrderRequest(BaseModel):
+    coin: str
+    strategy: str     # "A", "B", "C", or "D"
+    signal: dict      # output of the relevant score_strategy_* function
+
+
+@app.post("/mt5/open")
+async def mt5_open(req: MT5OrderRequest) -> dict:
+    """Trigger an MT5 order from a strategy signal dict."""
+    if not mt5_auto_trader:
+        return {"ok": False, "error": "MT5 not configured — set MT5_LOGIN, MT5_PASSWORD, MT5_SERVER in .env"}
+
+    coin = req.coin.upper()
+    # Load candles for ATR calculation
+    try:
+        launch_ms   = COIN_START_MS.get(coin, COIN_START_MS["BTC"])
+        interval_ms = INTERVAL_MS["1h"]
+        candle_data = await candle_cache.get_history(
+            coin, "1h", launch_ms, interval_ms, fetch_candles_paginated
+        )
+    except Exception:
+        candle_data = None
+
+    strategy = req.strategy.upper()
+    if strategy == "A":
+        result = await asyncio.to_thread(mt5_auto_trader.execute_strategy_a, req.signal, coin, candle_data)
+    elif strategy == "B":
+        candle_data_4h = None
+        try:
+            launch_ms = COIN_START_MS.get(coin, COIN_START_MS["BTC"])
+            candle_data_4h = await candle_cache.get_history(coin, "4h", launch_ms, INTERVAL_MS["4h"], fetch_candles_paginated)
+        except Exception:
+            pass
+        result = await asyncio.to_thread(mt5_auto_trader.execute_strategy_b, req.signal, coin, candle_data)
+    elif strategy == "C":
+        result = await asyncio.to_thread(mt5_auto_trader.execute_strategy_c, req.signal, coin, candle_data)
+    elif strategy == "D":
+        result = await asyncio.to_thread(mt5_auto_trader.execute_strategy_d, req.signal, coin, candle_data)
+    else:
+        return {"ok": False, "error": f"Unknown strategy '{strategy}'. Use A, B, C, or D."}
+
+    return result
+
+
+class MT5TestTradeRequest(BaseModel):
+    coin:    str   = "BTC"
+    is_buy:  bool  = True
+    volume:  float = 0.01
+    comment: str   = "MEGALPHA_TEST"
+
+
+@app.post("/mt5/test-trade")
+async def mt5_test_trade(req: MT5TestTradeRequest) -> dict:
+    """Place a raw minimum-lot market order on MT5 — for connectivity testing."""
+    if not mt5_bridge:
+        return {"ok": False, "error": "MT5 not configured"}
+    result = await asyncio.to_thread(
+        mt5_bridge.market_order,
+        req.coin, req.is_buy, req.volume, 0.0, 0.0, req.comment,
+    )
+    return result
+
+
+@app.post("/mt5/close-all")
+async def mt5_close_all() -> dict:
+    """Close all open MT5 positions (emergency / test cleanup)."""
+    if not mt5_bridge:
+        return {"ok": False, "error": "MT5 not configured"}
+    positions = await asyncio.to_thread(mt5_bridge.get_positions)
+    results = []
+    for pos in positions:
+        res = await asyncio.to_thread(mt5_bridge.close_position, pos["ticket"])
+        results.append({"ticket": pos["ticket"], "symbol": pos["symbol"], **res})
+    return {"closed": len(results), "results": results}
+
+
+@app.get("/mt5/positions")
+async def mt5_positions() -> list:
+    """Get all open MT5 positions."""
+    if not mt5_bridge:
+        return []
+    return await asyncio.to_thread(mt5_bridge.get_positions)
+
+
+@app.post("/mt5/close/{ticket}")
+async def mt5_close(ticket: int) -> dict:
+    """Close a specific MT5 position by ticket number."""
+    if not mt5_bridge:
+        return {"ok": False, "error": "MT5 not configured"}
+    result = await asyncio.to_thread(mt5_bridge.close_position, ticket)
+    if result.get("ok") and mt5_auto_trader:
+        mt5_auto_trader.open_positions.pop(ticket, None)
+    return result
+
+
+@app.get("/mt5/status")
+async def mt5_status() -> dict:
+    """MT5 connection status, account info, and auto-trader state."""
+    if not mt5_bridge:
+        return {"connected": False, "configured": False}
+    account = await asyncio.to_thread(mt5_bridge.get_account_info)
+    status = {"configured": True, **account}
+    if mt5_auto_trader:
+        status["auto_trader"] = mt5_auto_trader.get_status()
+    return status
+
+
+# ─── strategy scan endpoint ───────────────────────────────────────────────────
+
+class StrategyScanRequest(BaseModel):
+    coin: str = "BTC"
+    interval: str = "1h"
+
+
+@app.post("/strategies/scan")
+async def strategies_scan(req: StrategyScanRequest) -> dict:
+    """
+    Run all 4 MegaAlpha strategies on the latest candles for the given coin/interval.
+    Returns signals (or None) for each strategy.
+    """
+    coin = req.coin.upper()
+    if coin not in COINS:
+        return {"error": f"Unknown coin: {coin}"}
+    if req.interval not in INTERVAL_MS:
+        return {"error": f"Unknown interval: {req.interval}"}
+
+    launch_ms   = COIN_START_MS.get(coin, COIN_START_MS["BTC"])
+    interval_ms = INTERVAL_MS[req.interval]
+
+    try:
+        candle_data = await candle_cache.get_history(
+            coin, req.interval, launch_ms, interval_ms, fetch_candles_paginated
+        )
+    except Exception as exc:
+        return {"error": f"Failed to load candles: {exc}"}
+
+    if not candle_data:
+        return {"error": "No candle data available"}
+
+    from strategies_mega import (
+        score_strategy_a, signal_strategy_b, detect_fu_candle, score_strategy_d,
+        detect_regime as _detect_regime,
+    )
+
+    # Load 4h candles for strategy B and regime
+    try:
+        candle_4h = await candle_cache.get_history(
+            coin, "4h", launch_ms, INTERVAL_MS["4h"], fetch_candles_paginated
+        )
+    except Exception:
+        candle_4h = []
+
+    def _run_all():
+        a_signal = score_strategy_a(candle_data, coin)
+        b_signal = signal_strategy_b(candle_data, candle_4h) if candle_4h else None
+        c_signal = detect_fu_candle(candle_data)
+        d_signal = score_strategy_d(candle_data, coin)
+        regime   = _detect_regime(candle_4h) if candle_4h else {}
+        return {"A": a_signal, "B": b_signal, "C": c_signal, "D": d_signal, "regime": regime}
+
+    result = await asyncio.to_thread(_run_all)
+    result["coin"]     = coin
+    result["interval"] = req.interval
+    result["candles"]  = len(candle_data)
+    return result
 
 
 if __name__ == "__main__":

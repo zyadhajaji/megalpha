@@ -1,5 +1,5 @@
 # MEGALPHA — Project Diagnostic
-**Last updated:** June 1, 2026
+**Last updated:** June 2, 2026
 **Project path:** `C:\Users\anakin\s-tier\megalpha`
 **Stack:** Next.js 16 · React 19 · TypeScript · Tailwind CSS v4 · IBM Plex Mono + Inter · FastAPI · Python 3.12 · Stable-Baselines3 (PPO) + PyTorch + Gymnasium · Hyperliquid WebSocket + REST API
 
@@ -19,6 +19,7 @@ MEGALPHA is a **professional quantitative trading platform** built around a loca
 | **4** | Data hub (funding, OI, liquidations) | ✅ **Complete** |
 | **5** | Journal (SQLite) + OpenRouter AI Analyst | ✅ **Complete** |
 | **5.5** | AI Signal Engine (institutional-grade, BTC/ETH/SOL) | ✅ **Complete** |
+| **5.6** | Signal Command UI — merged Strategies + AI Signals into two-panel terminal | ✅ **Complete** |
 | **6** | 24/7 cloud deployment (Oracle free VM) | ⏸ Paused (scaffold pending) |
 
 ---
@@ -75,6 +76,8 @@ localhost:8000   Python bridge server
 | Feature | Phase |
 |---|---|
 | 24/7 cloud deploy artifacts (Docker, Caddy, configurable bridge URL) | 6 |
+| `server/telegram_notifier.py` — recorded in memory as added but never written | 5.5 |
+| Partial score returned by backend for no-signal strategy results (shows "how close" a miss was) | future |
 
 ---
 
@@ -124,8 +127,15 @@ localhost:8000   Python bridge server
 | `risk.py` | **Shared risk module** — `RiskConfig` + % sizing, stop-loss/TP, max-DD kill-switch. Used by the backtester now; live execution (#19) later. |
 | `candle_cache.py` | Disk-backed full-history cache — `server/cache/{COIN}_{interval}.json` (gitignored). |
 | `binance_history.py` | One-time Binance backfill — prepends since-launch history (1h/15m/4h) before HL's recent window; HL wins overlaps. Live updates stay HL-only. |
-| `hl_trader.py` | Hyperliquid trading module (market open/close/cancel). Not auto-invoked. |
-| `.env` | `HL_PRIVATE_KEY` — **gitignored, never committed.** |
+| `hl_trader.py` | Hyperliquid trading module (market open/close/cancel). Endpoints: `POST /trade/hl/open`, `POST /trade/hl/close`, `POST /trade/hl/cancel`. |
+| `strategies_mega.py` | **Institutional strategy suite** — Strategies A/B/C/D + `detect_regime()` + `calc_lot_size()` + `detect_phase()`. Wired into `POST /strategies/scan`. |
+| `signal_scanner.py` | AI Signal Engine scanner — `get_markets()`, `run_scan()`. Used by `/ai/signals/scan`. |
+| `ai_signals.py` | Signal generation via OpenRouter — `generate_signal()`. Called by `/ai/signals/generate`. |
+| `zones.py` | Supply/demand zone detection + liquidity sweep analysis. Used by `ai_signals.py` and `/ai/zones/{coin}`. |
+| `outcome_checker.py` | Outcome checker loop — evaluates signal results over time. |
+| `agent_backtest.py` | Agent-specific backtesting utilities. |
+| `strategies_mega.py` note | Not the same as `strategies.py` (which is save/load CRUD only). |
+| `.env` | `HL_PRIVATE_KEY`, `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` — **gitignored, never committed.** |
 | `models/` | Trained policies (`rl_policy_active.zip` + meta json). **Gitignored** — retrain after cloning. |
 
 ### Frontend (`app/`, `components/`, `hooks/`, `lib/`)
@@ -140,8 +150,11 @@ localhost:8000   Python bridge server
 | `components/pages/ChartsPage.tsx` | Full-screen ChartPanel with `advanced` (indicators on) |
 | `components/pages/OverviewPage.tsx` | Overview panels — ChartPanel **without** `advanced` (clean) |
 | `components/pages/BacktestPage.tsx` | Backtest UI — controls, equity curve, stat grid, trade log |
-| `components/pages/RLAgentPage.tsx` | **Rebuilt** — polls `/rl/status`; live decision + confidence, LONG/HOLD/SHORT bars, paper-forward stats + equity sparkline, 12-feature ±1 gauges |
-| `components/pages/DataHubPage.tsx` / `JournalPage.tsx` | Stubs — Phase 4 / 5 |
+| `components/pages/RLAgentPage.tsx` | Polls `/rl/status`; live decision + confidence, LONG/HOLD/SHORT bars, paper-forward stats + equity sparkline, 12-feature ±1 gauges |
+| `components/pages/DataHubPage.tsx` | Phase 4 complete — live funding rate + APR, OI, 24h vol, liquidations feed |
+| `components/pages/JournalPage.tsx` | Phase 5 complete — SQLite CRUD, auto-save, OpenRouter AI Analyst |
+| `components/pages/StrategiesPage.tsx` | **Signal Command** (Phase 5.6) — two-panel terminal: left=A/B/C/D scanner + consensus banner + HL execute; right=AI signal feed. Regime strip fixed at top. MT5 removed. |
+| `components/pages/SignalsPage.tsx` | Exports `AISignalPanel` (embedded in StrategiesPage right panel) + default `SignalsPage` wrapper. No longer a standalone sidebar route. |
 
 ---
 
@@ -231,15 +244,18 @@ Goal: run the bridge + agent 24/7. Chosen host: **Oracle Cloud Always-Free ARM V
 
 | Issue | Severity | Notes |
 |---|---|---|
-| Frontend hardcodes `http://localhost:8000` / `ws://localhost:8000` | Medium | In `useHLStream.ts`, `ChartPanel.tsx`, `useTrading.ts`, `BacktestPage.tsx`, `RLAgentPage.tsx`. Must become an env var before any remote/cloud deploy. |
+| Frontend hardcodes `http://localhost:8000` / `ws://localhost:8000` | **Resolved** | `lib/bridge.ts` exists; all TS files import `BRIDGE_HTTP`/`BRIDGE_WS`. Set `NEXT_PUBLIC_BRIDGE_URL` in `.env.local` for cloud. |
 | Python bridge has no auto-reload | Medium | Restart after editing `server/*.py`. |
 | RL agent currently abstains (HOLD) | Info | Expected with risk-adjusted reward + no learnable edge on BTC 1h. Retrain on 4h / tune penalties to change behavior. |
-| Paper-forward state is in-memory | Low | Resets on bridge restart. Persist to disk in 3.5 if a durable forward test is wanted. |
+| Paper-forward state is in-memory | Low | Resets on bridge restart. Persist to disk if a durable forward test is wanted. |
 | `on_event("startup")` deprecation in FastAPI | Low | Migrate to `lifespan` in a cleanup pass. |
-| Browser "Cannot redefine property: ethereum" overlay | Info | **Not an app bug** — two crypto wallet extensions (e.g., Exodus + another) collide over `window.ethereum`. Disable one, or use Incognito. The app never touches `window.ethereum`. |
+| Browser "Cannot redefine property: ethereum" overlay | Info | **Not an app bug** — two crypto wallet extensions collide over `window.ethereum`. Disable one or use Incognito. |
 | `models/` + `server/cache/` gitignored | Info | Regenerable. After cloning, run the bridge once (cache) and `train_rl.py` (model). |
-| `mt5_bridge.py` / `sniper_signals.py` on disk | Info | Dead code; safe to delete. |
+| `mt5_bridge.py` / `sniper_signals.py` / `mt5_auto_trader.py` on disk | Info | Dead code; safe to delete. MT5 panel fully removed from UI. |
+| Strategy scan returns `null` for no-signal (no partial score) | Low | Backend doesn't return how close a miss was. Planned future improvement. |
+| `telegram_notifier.py` missing | Low | Was recorded as added in memory but never written. Planned. |
+| `SignalToast.tsx` has pre-existing TS errors on `summary` properties | Low | `summary` typed as `{}` — needs `AISignalSummary` type applied. |
 
 ---
 
-*Diagnostic updated June 1, 2026 — Phases 1–5.5 complete. Phase 5 added: Journal page (SQLite CRUD, auto-save, entry list) + OpenRouter AI Analyst (streaming SSE, live market context injection, configurable model). Next: Phase 6 cloud deploy (Oracle ARM VM).*
+*Diagnostic updated June 2, 2026 — Phases 1–5.6 complete. Phase 5.6 added: Signal Command UI — StrategiesPage fully rewritten as a two-panel terminal merging A/B/C/D strategy scanner (left) with AI signal feed (right). Regime strip fixed at top. Consensus banner fires when ≥2 strategies agree. HL execute replaces MT5. Direction parsing bug fixed (string not Number). 15m interval removed from scanner. Signals page removed from sidebar nav. Bell/toast now navigate to Signal Command. Next: Phase 6 cloud deploy (Oracle ARM VM).*

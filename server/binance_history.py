@@ -16,7 +16,7 @@ import urllib.request
 import candle_cache
 
 BINANCE_URL = "https://api.binance.com/api/v3/klines"
-SYMBOL = {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT"}
+SYMBOL = {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT", "PAXG": "PAXGUSDT"}
 _VALID = {"15m", "1h", "4h", "1d"}   # same interval labels on both venues
 
 

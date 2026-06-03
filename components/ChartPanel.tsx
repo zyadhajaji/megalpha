@@ -2,12 +2,12 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import type { Candle, AISignal } from "@/lib/types";
-import { ema, rsi, macd, bollinger, volume, fib } from "@/lib/indicators";
+import { ema, rsi, macd, bollinger, volume, fib, adx as calcAdx, ema21 as calcEma21, ema55 as calcEma55, ema200 as calcEma200 } from "@/lib/indicators";
 import { BRIDGE_HTTP } from "@/lib/bridge";
 
 type Timeframe = "1m" | "15m" | "1h" | "4h" | "1d";
-type Coin = "BTC" | "ETH" | "SOL";
-type IndKey = "ma" | "bb" | "vol" | "rsi" | "macd" | "fib";
+type Coin = "BTC" | "ETH" | "SOL" | "PAXG";
+type IndKey = "bb" | "vol" | "rsi" | "macd" | "fib" | "adx";
 
 const TF_LABELS: Timeframe[] = ["1m", "15m", "1h", "4h", "1d"];
 
@@ -30,12 +30,12 @@ const TF_LIMIT: Record<Timeframe, number> = {
 };
 
 const IND_LABELS: { key: IndKey; label: string }[] = [
-  { key: "ma",   label: "MA" },
   { key: "bb",   label: "BOLL" },
   { key: "vol",  label: "VOL" },
   { key: "rsi",  label: "RSI" },
   { key: "macd", label: "MACD" },
   { key: "fib",  label: "FIB" },
+  { key: "adx",  label: "ADX" },
 ];
 
 // Price formatter: more decimals for sub-dollar assets, fewer for large prices.
@@ -72,6 +72,9 @@ interface Props {
   entryPrice?: number;
   // When true, show the indicator toolbar, sub-panes, fib levels and crosshair legend.
   advanced?: boolean;
+  // Full WS payload — used for regime badge
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  hl?: any;
 }
 
 async function fetchCandles(coin: Coin, interval: string, limit: number): Promise<Candle[]> {
@@ -82,14 +85,14 @@ async function fetchCandles(coin: Coin, interval: string, limit: number): Promis
   return res.json();
 }
 
-export default function ChartPanel({ liveCandles, prices, entryPrice, advanced = false }: Props) {
+export default function ChartPanel({ liveCandles, prices, entryPrice, advanced = false, hl }: Props) {
   const [coin, setCoin] = useState<Coin>("BTC");
   const [tf, setTf] = useState<Timeframe>("1h");
   const [loading, setLoading] = useState(false);
   const [historicalCandles, setHistoricalCandles] = useState<Candle[]>([]);
   const [chartReady, setChartReady] = useState(false);
   const [ind, setInd] = useState<Record<IndKey, boolean>>({
-    ma: true, bb: false, vol: true, rsi: false, macd: false, fib: false,
+    bb: false, vol: true, rsi: false, macd: false, fib: false, adx: false,
   });
 
   // ── Session clock ──────────────────────────────────────────────────────
@@ -146,7 +149,8 @@ export default function ChartPanel({ liveCandles, prices, entryPrice, advanced =
         body: JSON.stringify({ coin, interval: TF_INTERVAL[tf] }),
       });
       if (r.ok) {
-        const sig: AISignal = await r.json();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const sig: any = await r.json();
         if (!sig.error) {
           setAiSignals(prev => [sig, ...prev]);
           aiSignalsRef.current = [sig, ...aiSignalsRef.current];
@@ -421,21 +425,25 @@ export default function ChartPanel({ liveCandles, prices, entryPrice, advanced =
     const { LineSeries, HistogramSeries } = lc;
     const lineOpts = { lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false };
 
-    // Moving averages (EMA 9 / 20 / 50) on the price pane
-    if (ind.ma) {
-      const mas = [
-        { p: 9,  color: "#4e8ecf", label: "EMA9" },
-        { p: 20, color: "#cfad4e", label: "EMA20" },
-        { p: 50, color: "#cf4e8a", label: "EMA50" },
-      ];
-      for (const m of mas) {
-        const data = ema(candles, m.p);
-        if (!data.length) continue;
-        const s = chart.addSeries(LineSeries, { ...lineOpts, color: m.color }, 0);
-        s.setData(data);
-        indSeriesRef.current.push(s);
-        legendItemsRef.current.push({ label: m.label, series: s, color: m.color, fmt: fmtP, last: data[data.length - 1].value });
-      }
+    // ── PERMANENT EMAs: EMA200 (white), EMA55 (red), EMA21 (blue dashed) ──────
+    // These are always visible — not toggleable. Part of the base chart style.
+    const permanentEmas = [
+      { fn: calcEma200, color: "#e8e8e8", lineWidth: 2, lineStyle: 0, label: "EMA200" },
+      { fn: calcEma55,  color: "#cf4e4e", lineWidth: 1, lineStyle: 0, label: "EMA55"  },
+      { fn: calcEma21,  color: "#4e8ecf", lineWidth: 1, lineStyle: 1, label: "EMA21"  },
+    ];
+    for (const em of permanentEmas) {
+      const data = em.fn(candles);
+      if (!data.length) continue;
+      const s = chart.addSeries(LineSeries, {
+        ...lineOpts,
+        color: em.color,
+        lineWidth: em.lineWidth,
+        lineStyle: em.lineStyle,
+      }, 0);
+      s.setData(data);
+      indSeriesRef.current.push(s);
+      legendItemsRef.current.push({ label: em.label, series: s, color: em.color, fmt: fmtP, last: data[data.length - 1].value });
     }
 
     // Bollinger bands on the price pane
@@ -491,6 +499,20 @@ export default function ChartPanel({ liveCandles, prices, entryPrice, advanced =
       }
     }
 
+    if (ind.adx) {
+      const data = calcAdx(candles, 14);
+      if (data.length) {
+        const paneIdx = nextPane++;
+        const s = chart.addSeries(LineSeries, { color: "#8a4ecf", lineWidth: 1, priceLineVisible: false, lastValueVisible: true }, paneIdx);
+        s.setData(data);
+        // Reference lines at 20 (ranging threshold) and 30 (trending threshold)
+        s.createPriceLine({ price: 20, color: "rgba(100,100,100,0.4)", lineWidth: 1, lineStyle: 2, axisLabelVisible: false });
+        s.createPriceLine({ price: 30, color: "rgba(130,90,200,0.4)", lineWidth: 1, lineStyle: 2, axisLabelVisible: false });
+        indSeriesRef.current.push(s);
+        legendItemsRef.current.push({ label: "ADX", series: s, color: "#8a4ecf", fmt: (v) => v.toFixed(1), last: data[data.length - 1].value });
+      }
+    }
+
     // Size panes: price pane dominant, each sub-pane a smaller equal share
     const panes = chart.panes();
     if (panes.length) panes[0].setStretchFactor(3);
@@ -530,14 +552,18 @@ export default function ChartPanel({ liveCandles, prices, entryPrice, advanced =
         if (!dedupMap.has(s.time)) dedupMap.set(s.time, s);
       }
       const markerData = Array.from(dedupMap.values())
-        .map(s => ({
-          time:     s.time,
-          position: s.signal === "LONG" ? "belowBar" : "aboveBar",
-          color:    s.signal === "LONG" ? "#4ecf8a" : "#cf4e4e",
-          shape:    s.signal === "LONG" ? "arrowUp"  : "arrowDown",
-          text:     `AI ${s.signal === "LONG" ? "↑" : "↓"} ${s.confidence}%`,
-          size:     2,
-        }))
+        .map(s => {
+          const sm = s.summary;
+          const entryLabel = sm?.entry && sm.entry > 0 ? `  E:${fmtP(sm.entry)}` : "";
+          return {
+            time:     s.time,
+            position: s.signal === "LONG" ? "belowBar" : "aboveBar",
+            color:    s.signal === "LONG" ? "#4ecf8a" : "#cf4e4e",
+            shape:    s.signal === "LONG" ? "arrowUp"  : "arrowDown",
+            text:     `AI ${s.signal === "LONG" ? "↑ LONG" : "↓ SHORT"} ${s.confidence}%${entryLabel}`,
+            size:     2,
+          };
+        })
         .sort((a, b) => (a.time as number) - (b.time as number));
 
       if (lc?.createSeriesMarkers) {
@@ -557,9 +583,9 @@ export default function ChartPanel({ liveCandles, prices, entryPrice, advanced =
     _removeSignalLines();
     const sig = latestSignal;
     if (!sig || sig.signal === "HOLD") return;
-    const sm = sig.summary ?? {};
+    const sm = sig.summary;
     const newLines: unknown[] = [];
-    if (sm.entry > 0) {
+    if (sm && sm.entry > 0) {
       try {
         newLines.push(series.createPriceLine({
           price: sm.entry,
@@ -568,7 +594,7 @@ export default function ChartPanel({ liveCandles, prices, entryPrice, advanced =
         }));
       } catch {}
     }
-    if (sm.stop_loss > 0) {
+    if (sm && sm.stop_loss > 0) {
       try {
         newLines.push(series.createPriceLine({
           price: sm.stop_loss,
@@ -578,7 +604,7 @@ export default function ChartPanel({ liveCandles, prices, entryPrice, advanced =
         }));
       } catch {}
     }
-    if (sm.take_profit > 0) {
+    if (sm && sm.take_profit > 0) {
       try {
         newLines.push(series.createPriceLine({
           price: sm.take_profit,
@@ -633,7 +659,7 @@ export default function ChartPanel({ liveCandles, prices, entryPrice, advanced =
         }}
       >
         {/* Coin selector */}
-        {(["BTC", "ETH", "SOL"] as Coin[]).map((c) => (
+        {(["BTC", "ETH", "SOL", "PAXG"] as Coin[]).map((c) => (
           <button
             key={c}
             onClick={() => setCoin(c)}
@@ -679,6 +705,24 @@ export default function ChartPanel({ liveCandles, prices, entryPrice, advanced =
         {loading && (
           <span style={{ fontSize: 9, color: "#555" }}>loading...</span>
         )}
+
+        {/* Regime badge */}
+        {hl?.regime?.[coin] && (() => {
+          const r = hl.regime[coin];
+          const state = r.state as string;
+          const regimeColor = state === "TRENDING" ? "#4ecf8a" : state === "RANGING" ? "#cfad4e" : state === "HALTED" ? "#cf4e4e" : "#555";
+          const regimeBg    = state === "TRENDING" ? "rgba(78,207,138,0.06)" : state === "RANGING" ? "rgba(207,173,78,0.08)" : state === "HALTED" ? "rgba(207,78,78,0.08)" : "rgba(60,60,60,0.06)";
+          const regimeBorder = state === "TRENDING" ? "rgba(78,207,138,0.2)" : state === "RANGING" ? "rgba(207,173,78,0.2)" : state === "HALTED" ? "rgba(207,78,78,0.25)" : "rgba(60,60,60,0.15)";
+          return (
+            <span style={{
+              fontFamily: "var(--font-mono), 'IBM Plex Mono', monospace",
+              fontSize: 8, color: regimeColor, background: regimeBg,
+              border: `1px solid ${regimeBorder}`, borderRadius: 2, padding: "2px 6px",
+            }}>
+              {state} {r.adx > 0 ? `ADX${r.adx.toFixed(0)}` : ""}
+            </span>
+          );
+        })()}
 
         {/* Session indicator */}
         {sessionInfo.name && (
@@ -770,16 +814,16 @@ export default function ChartPanel({ liveCandles, prices, entryPrice, advanced =
           {(latestSignal.summary?.entry ?? 0) > 0 && (
             <>
               <span style={{ fontFamily: "var(--font-mono), monospace", fontSize: 8, color: "#888", flexShrink: 0 }}>
-                E ${(latestSignal.summary.entry).toLocaleString("en-US", { maximumFractionDigits: 2 })}
+                E ${(latestSignal.summary?.entry ?? 0).toLocaleString("en-US", { maximumFractionDigits: 2 })}
               </span>
               {(latestSignal.summary?.stop_loss ?? 0) > 0 && (
                 <span style={{ fontFamily: "var(--font-mono), monospace", fontSize: 8, color: "#cf4e4e", flexShrink: 0 }}>
-                  SL ${latestSignal.summary.stop_loss.toLocaleString("en-US", { maximumFractionDigits: 2 })}
+                  SL ${(latestSignal.summary?.stop_loss ?? 0).toLocaleString("en-US", { maximumFractionDigits: 2 })}
                 </span>
               )}
               {(latestSignal.summary?.take_profit ?? 0) > 0 && (
                 <span style={{ fontFamily: "var(--font-mono), monospace", fontSize: 8, color: "#4ecf8a", flexShrink: 0 }}>
-                  TP ${latestSignal.summary.take_profit.toLocaleString("en-US", { maximumFractionDigits: 2 })}
+                  TP ${(latestSignal.summary?.take_profit ?? 0).toLocaleString("en-US", { maximumFractionDigits: 2 })}
                 </span>
               )}
               {latestSignal.summary?.risk_reward && (

@@ -18,6 +18,10 @@ Strategies (all long + short):
   ema_cross       EMA9 / EMA21 crossover (always in the market, flips)
   macd            MACD line / signal crossover (always in the market, flips)
   bollinger       fade 2-sigma band touches back to the basis
+  stop_hunt_a     liquidity sweep sniper with 4-condition scoring (Strategy A)
+  trend_follow_b  EMA21/55 cross + ADX filter + EMA200 macro filter (Strategy B)
+  sniper_c        FU candle pattern with 50% wick entry, 3:1 min R:R (Strategy C)
+  unified_d       8-condition unified sniper combining A+C logic (Strategy D)
 """
 
 from __future__ import annotations
@@ -105,33 +109,280 @@ def _macd(closes: list[float]) -> tuple[list[float], list[float]]:
     signal = _ema(line, 9)
     return line, signal
 
+
+def _adx(candles: list[dict], period: int = 14) -> list[float]:
+    """
+    Wilder's ADX (Average Directional Index).
+    Needed for regime detection and Strategy B trend confirmation.
+    Returns per-bar ADX values (0-100).
+    """
+    n = len(candles)
+    out = [0.0] * n
+    if n < period + 1:
+        return out
+
+    trs: list[float] = []
+    plus_dms: list[float] = []
+    minus_dms: list[float] = []
+
+    for i in range(1, n):
+        high       = candles[i]["high"]
+        low        = candles[i]["low"]
+        prev_high  = candles[i - 1]["high"]
+        prev_low   = candles[i - 1]["low"]
+        prev_close = candles[i - 1]["close"]
+
+        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+        trs.append(tr)
+
+        up_move   = high - prev_high
+        down_move = prev_low - low
+        plus_dm  = up_move   if (up_move > down_move and up_move > 0)   else 0.0
+        minus_dm = down_move if (down_move > up_move and down_move > 0) else 0.0
+        plus_dms.append(plus_dm)
+        minus_dms.append(minus_dm)
+
+    if len(trs) < period:
+        return out
+
+    atr_w = sum(trs[:period])
+    pdm_w = sum(plus_dms[:period])
+    mdm_w = sum(minus_dms[:period])
+
+    dxs: list[float] = []
+
+    def _di(pdm: float, mdm: float, atr_val: float):
+        if atr_val <= 0:
+            return 0.0, 0.0
+        return (pdm / atr_val) * 100, (mdm / atr_val) * 100
+
+    plus_di, minus_di = _di(pdm_w, mdm_w, atr_w)
+    dx_sum = abs(plus_di - minus_di) / (plus_di + minus_di + 1e-9) * 100
+    dxs.append(dx_sum)
+
+    for i in range(period, len(trs)):
+        atr_w = atr_w - atr_w / period + trs[i]
+        pdm_w = pdm_w - pdm_w / period + plus_dms[i]
+        mdm_w = mdm_w - mdm_w / period + minus_dms[i]
+        plus_di, minus_di = _di(pdm_w, mdm_w, atr_w)
+        dx = abs(plus_di - minus_di) / (plus_di + minus_di + 1e-9) * 100
+        dxs.append(dx)
+
+    if len(dxs) < period:
+        return out
+
+    adx_val = sum(dxs[:period]) / period
+    adx_start = period * 2
+
+    if adx_start - 1 < n:
+        out[adx_start - 1] = adx_val
+
+    for j in range(period, len(dxs)):
+        adx_val = (adx_val * (period - 1) + dxs[j]) / period
+        candle_idx = j + period
+        if candle_idx < n:
+            out[candle_idx] = adx_val
+
+    return out
+
+
+def _bb_width(closes: list[float], period: int = 20) -> list[float]:
+    """Bollinger Band width = (upper - lower) / middle * 100."""
+    n = len(closes)
+    out = [0.0] * n
+    sma_vals = _sma(closes, period)
+    std_vals  = _rolling_std(closes, period)
+    for i in range(period - 1, n):
+        mid = sma_vals[i]
+        if mid <= 0:
+            continue
+        upper = mid + 2 * std_vals[i]
+        lower = mid - 2 * std_vals[i]
+        out[i] = (upper - lower) / mid * 100
+    return out
+
+
 # ─── strategy layer ───────────────────────────────────────────────────────────
 
-STRATEGIES = ("momentum", "breakout", "mean_reversion", "ema_cross", "macd", "bollinger")
-Strategy = Literal["momentum", "breakout", "mean_reversion", "ema_cross", "macd", "bollinger"]
+STRATEGIES = (
+    "momentum", "breakout", "mean_reversion", "ema_cross", "macd", "bollinger",
+    "supply_demand", "sl_hunt", "valued_risk",
+    "stop_hunt_a", "trend_follow_b", "sniper_c", "unified_d",
+)
+Strategy = Literal[
+    "momentum", "breakout", "mean_reversion", "ema_cross", "macd", "bollinger",
+    "supply_demand", "sl_hunt", "valued_risk",
+    "stop_hunt_a", "trend_follow_b", "sniper_c", "unified_d",
+]
 
 WARMUP  = 35     # candles needed before slow indicators (EMA26 + MACD signal) settle
 FEE_BPS = 3.5    # HL taker fee per side
+
+
+def _supply_demand_zones(
+    closes: list[float],
+    highs: list[float],
+    lows: list[float],
+    atr14: list[float],
+    base_bars: int = 4,
+) -> tuple[list, list, list, list]:
+    """
+    Identify supply/demand zones using the "base-then-impulse" pattern.
+
+    A demand zone forms when a tight consolidation (base_bars candles with
+    combined range < 0.7 × ATR) is followed by a strong bullish impulse candle
+    (body > 1.1 × ATR). The base range becomes the demand zone — price tends to
+    return there to mitigate unfilled orders.
+
+    A supply zone forms symmetrically after a bearish impulse.
+
+    Zones are invalidated when price CLOSES through them (demand: below zone_lo;
+    supply: above zone_hi).
+
+    Returns four per-bar lists: (dz_hi, dz_lo, sz_hi, sz_lo).
+    None entries mean no active zone at that bar.
+    """
+    n = len(closes)
+    dz_hi: list = [None] * n
+    dz_lo: list = [None] * n
+    sz_hi: list = [None] * n
+    sz_lo: list = [None] * n
+
+    cur_dz: tuple = (None, None)   # (hi, lo)
+    cur_sz: tuple = (None, None)
+
+    for i in range(base_bars + 2, n):
+        a = max(atr14[i] or 0.0, 1e-9)
+        c = closes[i]
+
+        # Invalidate on close-through
+        if cur_dz[1] is not None and c < cur_dz[1]:
+            cur_dz = (None, None)
+        if cur_sz[0] is not None and c > cur_sz[0]:
+            cur_sz = (None, None)
+
+        # Impulse detection: large body in one direction
+        body   = abs(closes[i] - closes[i - 1])
+        range_ = highs[i] - lows[i]
+        if body > 1.1 * a and range_ > 0.9 * a:
+            base_hi = max(highs[i - base_bars : i])
+            base_lo = min(lows[i - base_bars : i])
+            base_range = base_hi - base_lo
+            # Confirm it was actually a tight base (consolidation)
+            if base_range < 0.75 * a:
+                if closes[i] > closes[i - 1]:   # bullish impulse → demand below
+                    cur_dz = (base_hi, base_lo)
+                else:                            # bearish impulse → supply above
+                    cur_sz = (base_hi, base_lo)
+
+        dz_hi[i], dz_lo[i] = cur_dz
+        sz_hi[i], sz_lo[i] = cur_sz
+
+    return dz_hi, dz_lo, sz_hi, sz_lo
+
+
+def _rolling_swing(highs: list[float], lows: list[float], lookback: int = 15) -> tuple[list, list]:
+    """Per-bar rolling highest-high and lowest-low over the last `lookback` bars.
+
+    Used for SL-hunt detection (identifying the liquidity pools that institutions
+    target) and for structural R:R calculations.
+    """
+    n = len(highs)
+    swing_hi = [0.0] * n
+    swing_lo = [0.0] * n
+    for i in range(lookback, n):
+        swing_hi[i] = max(highs[i - lookback : i])
+        swing_lo[i] = min(lows[i - lookback : i])
+    return swing_hi, swing_lo
+
+
+def _structural_rr(
+    closes: list[float],
+    highs: list[float],
+    lows: list[float],
+    lookback: int = 25,
+) -> tuple[list, list]:
+    """
+    Per-bar structural R:R for hypothetical LONG and SHORT entries.
+
+    LONG R:R  = (swing_hi − close) / (close − swing_lo)
+    SHORT R:R = (close − swing_lo) / (swing_hi − close)
+
+    Uses rolling swing high/low as the structural SL and TP levels —
+    the same levels smart money watches — rather than arbitrary ATR multiples.
+    Returns (long_rr, short_rr) per-bar lists.
+    """
+    n = len(closes)
+    long_rr  = [0.0] * n
+    short_rr = [0.0] * n
+    for i in range(lookback, n):
+        c     = closes[i]
+        sl_lo = min(lows[i - lookback : i])    # structural SL for long
+        tp_hi = max(highs[i - lookback : i])   # structural TP for long
+        sl_hi = tp_hi                           # structural SL for short
+        tp_lo = sl_lo                           # structural TP for short
+
+        long_risk   = c - sl_lo
+        long_reward = tp_hi - c
+        if long_risk > 1e-9 and long_reward > 0:
+            long_rr[i] = long_reward / long_risk
+
+        short_risk   = sl_hi - c
+        short_reward = c - tp_lo
+        if short_risk > 1e-9 and short_reward > 0:
+            short_rr[i] = short_reward / short_risk
+
+    return long_rr, short_rr
 
 
 def _indicators(candles: list[dict]) -> dict:
     closes = [c["close"] for c in candles]
     highs  = [c["high"]  for c in candles]
     lows   = [c["low"]   for c in candles]
+    vols   = [c.get("volume", 0.0) for c in candles]
     macd_line, macd_sig = _macd(closes)
+    atr14 = _atr(candles, 14)
+
+    dz_hi, dz_lo, sz_hi, sz_lo = _supply_demand_zones(closes, highs, lows, atr14)
+    swing_hi, swing_lo = _rolling_swing(highs, lows, lookback=15)
+    # Extended swing for strategy A/D (20-bar window)
+    swing_hi20, swing_lo20 = _rolling_swing(highs, lows, lookback=20)
+    long_rr, short_rr  = _structural_rr(closes, highs, lows, lookback=25)
+
+    opens = [c["open"] for c in candles]
+
     return {
-        "closes":   closes,
-        "highs":    highs,
-        "lows":     lows,
-        "ema9":     _ema(closes, 9),
-        "ema20":    _ema(closes, 20),
-        "ema21":    _ema(closes, 21),
-        "rsi14":    _rsi(closes, 14),
-        "atr14":    _atr(candles, 14),
-        "sma20":    _sma(closes, 20),
-        "std20":    _rolling_std(closes, 20),
-        "macd":     macd_line,
-        "macd_sig": macd_sig,
+        "closes":      closes,
+        "highs":       highs,
+        "lows":        lows,
+        "opens":       opens,
+        "volumes":     vols,
+        "ema9":        _ema(closes, 9),
+        "ema20":       _ema(closes, 20),
+        "ema21":       _ema(closes, 21),
+        "ema50":       _ema(closes, 50),
+        "ema55":       _ema(closes, 55),
+        "ema200":      _ema(closes, 200),
+        "rsi14":       _rsi(closes, 14),
+        "atr14":       atr14,
+        "sma20":       _sma(closes, 20),
+        "std20":       _rolling_std(closes, 20),
+        "macd":        macd_line,
+        "macd_sig":    macd_sig,
+        "adx14":       _adx(candles, 14),
+        "bb_width":    _bb_width(closes, 20),
+        # Supply / demand zones
+        "dz_hi":       dz_hi,
+        "dz_lo":       dz_lo,
+        "sz_hi":       sz_hi,
+        "sz_lo":       sz_lo,
+        # Structural levels for SL-hunt and R:R validation
+        "swing_hi":    swing_hi,
+        "swing_lo":    swing_lo,
+        "swing_hi20":  swing_hi20,
+        "swing_lo20":  swing_lo20,
+        "long_rr":     long_rr,
+        "short_rr":    short_rr,
     }
 
 
@@ -195,6 +446,303 @@ def _target(strategy: str, ind: dict, i: int, position: int) -> int:
         if close < roll_low:
             return -1
         return 0
+
+    # ── SUPPLY & DEMAND ──────────────────────────────────────────────────────
+    # Enter when price re-tests a fresh institutional zone formed by a
+    # "base-then-impulse" sequence. Demand zones attract long entries; supply
+    # zones attract short entries. Zone is invalidated by a closing breach.
+    if strategy == "supply_demand":
+        dz_h = ind["dz_hi"][i]
+        dz_l = ind["dz_lo"][i]
+        sz_h = ind["sz_hi"][i]
+        sz_l = ind["sz_lo"][i]
+        atr  = ind["atr14"][i] or 1e-9
+
+        in_demand = dz_h is not None and dz_l <= close <= dz_h
+        in_supply = sz_h is not None and sz_l <= close <= sz_h
+
+        # Confirm re-test with RSI: avoid entering on initial impulse leg
+        rsi = ind["rsi14"][i]
+
+        if in_demand and position <= 0 and rsi < 60:
+            return 1    # long from demand zone
+        if in_supply and position >= 0 and rsi > 40:
+            return -1   # short from supply zone
+        # Trail inside a position: exit when zone on the other side activates
+        if position == 1 and in_supply:
+            return -1   # flip to short at supply
+        if position == -1 and in_demand:
+            return 1    # flip to long at demand
+        return position
+
+    # ── STOP-LOSS HUNT (Liquidity Sweep) ────────────────────────────────────
+    # Institutions often drive price beyond obvious stop clusters (equal highs /
+    # lows, swing pivots) to trigger retail stops and grab liquidity before
+    # reversing. We detect this as a candle whose wick sweeps a key level but
+    # whose close returns back inside — then trade the reversal.
+    #
+    # Entry criteria:
+    #   LONG sweep: low < rolling_swing_lo AND close > rolling_swing_lo
+    #               AND sweep extension < 0.6 × ATR (quick wick, not a break)
+    #   SHORT sweep: high > rolling_swing_hi AND close < rolling_swing_hi
+    #                AND extension < 0.6 × ATR
+    if strategy == "sl_hunt":
+        if i < 15:
+            return 0
+        atr      = ind["atr14"][i] or 1e-9
+        sw_lo    = ind["swing_lo"][i]
+        sw_hi    = ind["swing_hi"][i]
+        c_low    = ind["lows"][i]
+        c_high   = ind["highs"][i]
+        rsi      = ind["rsi14"][i]
+
+        long_sweep  = (c_low  < sw_lo and close > sw_lo and (sw_lo - c_low)  < 0.6 * atr)
+        short_sweep = (c_high > sw_hi and close < sw_hi and (c_high - sw_hi) < 0.6 * atr)
+
+        if long_sweep  and position <= 0 and rsi < 55:
+            return 1    # reversal long after liquidity grab below
+        if short_sweep and position >= 0 and rsi > 45:
+            return -1   # reversal short after liquidity grab above
+        # Once in a sweep trade, hold until the opposite sweep fires
+        return position
+
+    # ── VALUED RISK (Structure-Based R:R Filter) ─────────────────────────────
+    # Most strategies enter regardless of the trade's actual risk-reward profile.
+    # This strategy adds a mandatory structural R:R gate: it uses real swing
+    # highs/lows as the SL and TP reference, and only enters when the natural
+    # R:R ≥ 2.5 — matching the institutional standard used in the AI signal engine.
+    #
+    # Direction: EMA20 trend filter + RSI confirmation
+    # Entry gate: pre-computed structural long_rr / short_rr ≥ 2.5
+    if strategy == "valued_risk":
+        if i < 25:
+            return 0
+        rsi  = ind["rsi14"][i]
+        ema  = ind["ema20"][i] or close
+        lrr  = ind["long_rr"][i]
+        srr  = ind["short_rr"][i]
+
+        # Trend and momentum pre-filter
+        bullish = close > ema and 35 < rsi < 68
+        bearish = close < ema and 32 < rsi < 65
+
+        if bullish and lrr >= 2.5 and position <= 0:
+            return 1
+        if bearish and srr >= 2.5 and position >= 0:
+            return -1
+        # Hold the position until trend flips or R:R gate closes
+        if position == 1 and (close < ema or lrr < 1.0):
+            return 0
+        if position == -1 and (close > ema or srr < 1.0):
+            return 0
+        return position
+
+    # ── STOP HUNT A (Liquidity Sweep Sniper with 4-condition scoring) ───────────
+    # Refined version of sl_hunt with full A-strategy scoring.
+    # Detects wick breaches 0.15-1.5% beyond 20-bar swing levels followed by
+    # reclaim on close. Needs 3/4 conditions: wick, reclaim, volume, EMA align.
+    if strategy == "stop_hunt_a":
+        if i < 22:
+            return 0
+        close  = ind["closes"][i]
+        high   = ind["highs"][i]
+        low    = ind["lows"][i]
+        atr    = ind["atr14"][i] or 1e-9
+        sw_hi  = ind["swing_hi20"][i]
+        sw_lo  = ind["swing_lo20"][i]
+        ema20_v = ind["ema20"][i]
+        ema50_v = ind["ema50"][i]
+        vols    = ind["volumes"]
+        vol_avg = sum(vols[i - 20 : i]) / 20 if i >= 20 else 1.0
+        vol_cur = vols[i] if vols[i] > 0 else vol_avg
+        vol_ratio = vol_cur / (vol_avg + 1e-9)
+
+        # Genuine breakout (> 5x vol) → skip
+        if vol_ratio > 5.0:
+            return 0
+
+        # Long setup: wick below swing_lo + close reclaim
+        if low < sw_lo and close > sw_lo and position <= 0:
+            breach_pct = (sw_lo - low) / (sw_lo + 1e-9) * 100
+            if 0.15 <= breach_pct <= 1.5:
+                score = 30   # reclaim is non-negotiable
+                if vol_ratio >= 2.0:
+                    score += 25
+                if ema20_v > ema50_v:
+                    score += 20
+                score += 25  # wick breach already confirmed above
+                if score >= 75:
+                    return 1
+
+        # Short setup: wick above swing_hi + close reclaim
+        if high > sw_hi and close < sw_hi and position >= 0:
+            breach_pct = (high - sw_hi) / (sw_hi + 1e-9) * 100
+            if 0.15 <= breach_pct <= 1.5:
+                score = 30
+                if vol_ratio >= 2.0:
+                    score += 25
+                if ema20_v < ema50_v:
+                    score += 20
+                score += 25
+                if score >= 75:
+                    return -1
+
+        return position
+
+    # ── TREND FOLLOW B (EMA21/55 Cross + ADX Filter + EMA200 Macro) ──────────
+    # Primary: EMA21 crosses EMA55. Confirmation: ADX > 25. Macro: price vs EMA200.
+    # Exit: EMA21/55 re-cross OR ADX < 20 for 2 consecutive bars.
+    if strategy == "trend_follow_b":
+        if i < 60:
+            return 0
+        ema21_v  = ind["ema21"][i]
+        ema55_v  = ind["ema55"][i]
+        ema21_p  = ind["ema21"][i - 1]
+        ema55_p  = ind["ema55"][i - 1]
+        adx      = ind["adx14"][i]
+        adx_prev = ind["adx14"][i - 1]
+        ema200_v = ind["ema200"][i]
+        close    = ind["closes"][i]
+
+        bullish_cross = ema21_p <= ema55_p and ema21_v > ema55_v
+        bearish_cross = ema21_p >= ema55_p and ema21_v < ema55_v
+
+        # Exit: ADX < 20 for 2 bars
+        if position != 0 and adx < 20 and adx_prev < 20:
+            return 0
+
+        # Exit: EMA re-cross
+        if position == 1 and ema21_v < ema55_v:
+            return 0
+        if position == -1 and ema21_v > ema55_v:
+            return 0
+
+        # Entry: cross + ADX + macro filter
+        if bullish_cross and adx > 25 and close > ema200_v:
+            return 1
+        if bearish_cross and adx > 25 and close < ema200_v:
+            return -1
+
+        return position
+
+    # ── SNIPER C (FU Candle with 50% wick entry) ─────────────────────────────
+    # FU candle = wick sweeps a swing level + closes back in opposite direction.
+    # Backtester entry simulated at 50% wick midpoint (limit order simulation:
+    # we enter if the next candle touches the wick midpoint level).
+    # R:R minimum 3:1 (simplified for backtesting, vs 6:1 in live execution).
+    if strategy == "sniper_c":
+        if i < 22:
+            return 0
+        close  = ind["closes"][i]
+        high   = ind["highs"][i]
+        low    = ind["lows"][i]
+        open_v = ind["opens"][i]
+        atr    = ind["atr14"][i] or 1e-9
+        sw_hi  = ind["swing_hi20"][i]
+        sw_lo  = ind["swing_lo20"][i]
+
+        # FU long: wick below swing_lo, closes above open (bullish close)
+        if low < sw_lo and close > open_v and close > sw_lo and position <= 0:
+            # Wick midpoint entry
+            wick_mid  = (low + sw_lo) / 2
+            sl_dist   = wick_mid - (low * 0.995)
+            if sl_dist > 0:
+                rr = (sw_hi - wick_mid) / sl_dist
+                if rr >= 3.0:
+                    return 1
+
+        # FU short: wick above swing_hi, closes below open (bearish close)
+        if high > sw_hi and close < open_v and close < sw_hi and position >= 0:
+            wick_mid = (high + sw_hi) / 2
+            sl_dist  = (high * 1.005) - wick_mid
+            if sl_dist > 0:
+                rr = (wick_mid - sw_lo) / sl_dist
+                if rr >= 3.0:
+                    return -1
+
+        # Hold existing position until opposite FU fires
+        return position
+
+    # ── UNIFIED D (8-condition scoring, requires A+C logic) ──────────────────
+    # FU candle confirmed AND volume spike AND close reclaim AND orderblock.
+    # Entry at 50% wick midpoint. R:R >= 4:1.
+    if strategy == "unified_d":
+        if i < 25:
+            return 0
+        close  = ind["closes"][i]
+        high   = ind["highs"][i]
+        low    = ind["lows"][i]
+        open_v = ind["opens"][i]
+        atr    = ind["atr14"][i] or 1e-9
+        sw_hi  = ind["swing_hi20"][i]
+        sw_lo  = ind["swing_lo20"][i]
+        ema20_v = ind["ema20"][i]
+        ema50_v = ind["ema50"][i]
+        vols    = ind["volumes"]
+        vol_avg = sum(vols[i - 20 : i]) / 20 if i >= 20 else 1.0
+        vol_cur = vols[i] if vols[i] > 0 else vol_avg
+        vol_ratio = vol_cur / (vol_avg + 1e-9)
+
+        if vol_ratio > 5.0:
+            return 0
+
+        score = 0
+
+        # Long unified setup
+        if low < sw_lo and close > sw_lo and position <= 0:
+            breach_pct = (sw_lo - low) / (sw_lo + 1e-9) * 100
+            if 0.15 <= breach_pct <= 1.5:
+                score += 10                    # cond 1: wick breach
+            if vol_ratio >= 2.0:
+                score += 15                    # cond 2: vol spike
+            if close > sw_lo:
+                score += 15                    # cond 3: reclaim (non-negotiable)
+            else:
+                score = 0
+            if ema20_v > ema50_v:
+                score += 10                    # cond 4: htf bias
+            # cond 5: FU candle (wick + structure broken in same candle)
+            if low < sw_lo and close > open_v:
+                score += 20
+            # simplified conds 6/7/8: combine as bonus block
+            if breach_pct < 0.5 and vol_ratio >= 2.5:
+                score += 10 + 10 + 10          # OB + FVG + liq density
+
+            if score >= 60:
+                wick_mid = (low + sw_lo) / 2
+                sl_dist  = wick_mid - (low * 0.995)
+                if sl_dist > 0:
+                    rr = (sw_hi - wick_mid) / sl_dist
+                    if rr >= 4.0:
+                        return 1
+
+        # Short unified setup
+        elif high > sw_hi and close < sw_hi and position >= 0:
+            breach_pct = (high - sw_hi) / (sw_hi + 1e-9) * 100
+            if 0.15 <= breach_pct <= 1.5:
+                score += 10
+            if vol_ratio >= 2.0:
+                score += 15
+            if close < sw_hi:
+                score += 15
+            else:
+                score = 0
+            if ema20_v < ema50_v:
+                score += 10
+            if high > sw_hi and close < open_v:
+                score += 20
+            if breach_pct < 0.5 and vol_ratio >= 2.5:
+                score += 30
+
+            if score >= 60:
+                wick_mid = (high + sw_hi) / 2
+                sl_dist  = (high * 1.005) - wick_mid
+                if sl_dist > 0:
+                    rr = (wick_mid - sw_lo) / sl_dist
+                    if rr >= 4.0:
+                        return -1
+
+        return position
 
     return 0
 
@@ -291,6 +839,28 @@ def run_backtest(
             if hit is not None:
                 close_position(hit, nxt["time"])
 
+        # 1b) ATR trailing stop update for trend_follow_b
+        if strategy == "trend_follow_b" and position != 0 and sl is not None:
+            atr_now = ind["atr14"][i]
+            if atr_now > 0:
+                close_i_tb = ind["closes"][i]
+                initial_sl_dist = abs(entry_px - sl)
+                # Tighten: if price moved 2*initial_sl from entry, use 1.5x ATR
+                if position == 1:
+                    if close_i_tb >= entry_px + 2 * initial_sl_dist:
+                        new_trail = close_i_tb - 1.5 * atr_now
+                    else:
+                        new_trail = close_i_tb - 2.5 * atr_now
+                    if new_trail > sl:
+                        sl = new_trail
+                else:
+                    if close_i_tb <= entry_px - 2 * initial_sl_dist:
+                        new_trail = close_i_tb + 1.5 * atr_now
+                    else:
+                        new_trail = close_i_tb + 2.5 * atr_now
+                    if new_trail < sl:
+                        sl = new_trail
+
         # 2) signal → target; or, if the kill switch fired, stay flat
         if halted:
             if position != 0:
@@ -314,6 +884,22 @@ def run_backtest(
                             takes.append(next_open + 2 * atr); stops.append(next_open - 1 * atr)
                         else:
                             takes.append(next_open - 2 * atr); stops.append(next_open + 1 * atr)
+                    if strategy == "trend_follow_b":
+                        atr = ind["atr14"][i]
+                        if atr > 0:
+                            if target == 1:
+                                stops.append(next_open - 2.5 * atr)
+                            else:
+                                stops.append(next_open + 2.5 * atr)
+                    if strategy in ("sniper_c", "unified_d", "stop_hunt_a"):
+                        # Use swing-based structural stop
+                        sw_hi = ind["swing_hi20"][i]
+                        sw_lo = ind["swing_lo20"][i]
+                        atr   = ind["atr14"][i]
+                        if target == 1 and sw_lo > 0:
+                            stops.append(sw_lo - atr * 0.5)
+                        elif target == -1 and sw_hi > 0:
+                            stops.append(sw_hi + atr * 0.5)
                     rsl, rtp = stop_levels(entry_px, position, leverage, risk)
                     if rsl is not None: stops.append(rsl)
                     if rtp is not None: takes.append(rtp)
