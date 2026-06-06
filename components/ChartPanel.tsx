@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import type { Candle, AISignal } from "@/lib/types";
-import { ema, rsi, macd, bollinger, volume, fib, adx as calcAdx, ema21 as calcEma21, ema55 as calcEma55, ema200 as calcEma200 } from "@/lib/indicators";
+import { ema, rsi, macd, bollinger, volume, fib, adx as calcAdx, ema21 as calcEma21, ema55 as calcEma55, ema200 as calcEma200, atrLine } from "@/lib/indicators";
 import { BRIDGE_HTTP } from "@/lib/bridge";
 
 type Timeframe = "1m" | "15m" | "1h" | "4h" | "1d";
@@ -95,6 +95,20 @@ export default function ChartPanel({ liveCandles, prices, entryPrice, advanced =
     bb: false, vol: true, rsi: false, macd: false, fib: false, adx: false,
   });
 
+  // ── Overlay toggles ───────────────────────────────────────────────────────
+  const [showOB,      setShowOB]      = useState(false);
+  const [showFVG,     setShowFVG]     = useState(false);
+  const [showFU,      setShowFU]      = useState(false);
+  const [showSessions,setShowSessions]= useState(false);
+  const [showNews,    setShowNews]    = useState(false);
+  const [showATR,     setShowATR]     = useState(false);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const [obData,  setObData]  = useState<any[]>([]);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const [fvgData, setFvgData] = useState<any[]>([]);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const [newsData,setNewsData]= useState<any[]>([]);
+
   // ── Session clock ──────────────────────────────────────────────────────
   const [sessionInfo, setSessionInfo] = useState({ name: "", quality: "", remaining: "" });
   useEffect(() => {
@@ -139,6 +153,45 @@ export default function ChartPanel({ liveCandles, prices, entryPrice, advanced =
     return () => { cancelled = true; };
   }, [coin, tf]);
 
+  // ── Fetch OB data when toggled on or coin/tf changes ───────────────────
+  useEffect(() => {
+    if (!showOB) { setObData([]); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch(`${BRIDGE_HTTP}/zones/orderblocks/${coin}/${TF_INTERVAL[tf]}`);
+        if (r.ok && !cancelled) setObData(await r.json());
+      } catch { /* bridge offline */ }
+    })();
+    return () => { cancelled = true; };
+  }, [showOB, coin, tf]);
+
+  // ── Fetch FVG data when toggled on or coin/tf changes ──────────────────
+  useEffect(() => {
+    if (!showFVG) { setFvgData([]); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch(`${BRIDGE_HTTP}/zones/fvgs/${coin}/${TF_INTERVAL[tf]}`);
+        if (r.ok && !cancelled) setFvgData(await r.json());
+      } catch { /* bridge offline */ }
+    })();
+    return () => { cancelled = true; };
+  }, [showFVG, coin, tf]);
+
+  // ── Fetch news events (once, cached) ────────────────────────────────────
+  useEffect(() => {
+    if (!showNews) { setNewsData([]); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch(`${BRIDGE_HTTP}/news/events`);
+        if (r.ok && !cancelled) setNewsData(await r.json());
+      } catch { /* bridge offline */ }
+    })();
+    return () => { cancelled = true; };
+  }, [showNews]);
+
   async function generateSignal() {
     if (aiGenerating) return;
     setAiGenerating(true);
@@ -181,6 +234,22 @@ export default function ChartPanel({ liveCandles, prices, entryPrice, advanced =
   const indRef          = useRef(ind);
   // Keeps the latest candles available at chart-init time (fixes race condition)
   const displayCandlesRef = useRef<Candle[]>([]);
+
+  // Overlay cleanup refs
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const obLinesRef      = useRef<any[]>([]);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const fvgLinesRef     = useRef<any[]>([]);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const newsLinesRef    = useRef<any[]>([]);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const fuMarkersRef    = useRef<any>(null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const atrSeriesRef    = useRef<any>(null);
+  // Session background series list
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const sessionSeriesRef= useRef<any[]>([]);
+  const roRef           = useRef<ResizeObserver | null>(null);
 
   const currentPrice = prices
     ? coin === "BTC" ? prices.btc : coin === "ETH" ? prices.eth : prices.sol
@@ -353,14 +422,17 @@ export default function ChartPanel({ liveCandles, prices, entryPrice, advanced =
         chart.timeScale().subscribeVisibleLogicalRangeChange(scheduleFib);
 
         const ro = new ResizeObserver(() => {
-          if (chartRef.current && chartInst.current) {
-            chartInst.current.applyOptions({
-              width:  chartRef.current.clientWidth,
-              height: chartRef.current.clientHeight,
-            });
-          }
+          try {
+            if (chartRef.current && chartInst.current) {
+              chartInst.current.applyOptions({
+                width:  chartRef.current.clientWidth,
+                height: chartRef.current.clientHeight,
+              });
+            }
+          } catch { /* chart disposed on nav — ignore */ }
         });
         ro.observe(chartRef.current);
+        roRef.current = ro;
 
         setChartReady(true);
       });
@@ -368,8 +440,10 @@ export default function ChartPanel({ liveCandles, prices, entryPrice, advanced =
     return () => {
       destroyed = true;
       if (fibRafRef.current) cancelAnimationFrame(fibRafRef.current);
+      // Disconnect ResizeObserver BEFORE chart.remove() to prevent "Object is disposed"
+      if (roRef.current) { roRef.current.disconnect(); roRef.current = null; }
       if (chartInst.current) {
-        chartInst.current.remove();
+        try { chartInst.current.remove(); } catch { /* already disposed */ }
         chartInst.current = null;
         seriesInst.current = null;
         entryLine.current = null;
@@ -377,9 +451,21 @@ export default function ChartPanel({ liveCandles, prices, entryPrice, advanced =
         legendItemsRef.current = [];
         fibLinesRef.current = [];
         signalLinesRef.current = [];
+        obLinesRef.current = [];
+        fvgLinesRef.current = [];
+        newsLinesRef.current = [];
+        sessionSeriesRef.current = [];
+        if (atrSeriesRef.current) {
+          try { /* already removed via chart.remove() */ } catch {}
+          atrSeriesRef.current = null;
+        }
         if (seriesMarkersRef.current) {
           try { seriesMarkersRef.current.detach?.(); } catch {}
           seriesMarkersRef.current = null;
+        }
+        if (fuMarkersRef.current) {
+          try { fuMarkersRef.current.detach?.(); } catch {}
+          fuMarkersRef.current = null;
         }
         setChartReady(false);
       }
@@ -643,6 +729,255 @@ export default function ChartPanel({ liveCandles, prices, entryPrice, advanced =
     }
   }, [entryPrice]);
 
+  // ── Helpers to remove overlay price-lines ────────────────────────────────
+  const clearObLines = () => {
+    const s = seriesInst.current;
+    if (!s) return;
+    for (const ln of obLinesRef.current) { try { s.removePriceLine(ln); } catch {} }
+    obLinesRef.current = [];
+  };
+  const clearFvgLines = () => {
+    const s = seriesInst.current;
+    if (!s) return;
+    for (const ln of fvgLinesRef.current) { try { s.removePriceLine(ln); } catch {} }
+    fvgLinesRef.current = [];
+  };
+  const clearNewsLines = () => {
+    const s = seriesInst.current;
+    if (!s) return;
+    for (const ln of newsLinesRef.current) { try { s.removePriceLine(ln); } catch {} }
+    newsLinesRef.current = [];
+  };
+
+  // ── OB overlay ───────────────────────────────────────────────────────────
+  useEffect(() => {
+    try { clearObLines(); } catch { obLinesRef.current = []; }
+    const s = seriesInst.current;
+    if (!s || !showOB || !obData.length) return;
+    try {
+    const lines: unknown[] = [];
+    for (const ob of obData) {
+      const isBuy = ob.type === "BUY" || ob.direction === "buy" || ob.side === "bull";
+      const col   = isBuy ? "rgba(58,170,114,0.55)" : "rgba(207,78,78,0.55)";
+      const label = isBuy ? "BUY OB" : "SELL OB";
+      try {
+        lines.push(s.createPriceLine({ price: ob.body_high, color: col, lineWidth: 1, lineStyle: 0, axisLabelVisible: true,  title: label }));
+        lines.push(s.createPriceLine({ price: ob.body_low,  color: col, lineWidth: 1, lineStyle: 0, axisLabelVisible: false, title: "" }));
+      } catch {}
+    }
+    obLinesRef.current = lines as never[];
+    } catch { /* chart disposed */ }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showOB, obData, chartReady]);
+
+  // ── FVG overlay ──────────────────────────────────────────────────────────
+  useEffect(() => {
+    try { clearFvgLines(); } catch { fvgLinesRef.current = []; }
+    const s = seriesInst.current;
+    if (!s || !showFVG || !fvgData.length) return;
+    try {
+    const lines: unknown[] = [];
+    for (const fvg of fvgData) {
+      const filled = fvg.filled === true || fvg.status === "filled";
+      const col    = filled ? "rgba(130,130,130,0.25)" : "rgba(207,207,78,0.6)";
+      const lbl    = filled ? "" : "FVG";
+      try {
+        lines.push(s.createPriceLine({ price: fvg.high, color: col, lineWidth: 1, lineStyle: 2, axisLabelVisible: true,  title: lbl }));
+        lines.push(s.createPriceLine({ price: fvg.low,  color: col, lineWidth: 1, lineStyle: 2, axisLabelVisible: false, title: "" }));
+      } catch {}
+    }
+    fvgLinesRef.current = lines as never[];
+    } catch { /* chart disposed */ }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showFVG, fvgData, chartReady]);
+
+  // ── News overlay ─────────────────────────────────────────────────────────
+  useEffect(() => {
+    try { clearNewsLines(); } catch { newsLinesRef.current = []; }
+    const s = seriesInst.current;
+    if (!s || !showNews || !newsData.length) return;
+    try {
+    const lines: unknown[] = [];
+    for (const ev of newsData) {
+      const isHigh = ev.impact === "High" || ev.impact === "high" || ev.impact === "HIGH";
+      const col    = isHigh ? "rgba(207,78,78,0.7)" : "rgba(207,173,78,0.6)";
+      try {
+        // Vertical "line" approximation: a price-line at the event's timestamp
+        // lightweight-charts doesn't support true verticals; we use a marker instead.
+        // We attach to seriesInst as a named price-label at price=0 with axis label.
+        // The better visual is a series marker at the candle closest to the event time.
+        lines.push(s.createPriceLine({
+          price: 0,
+          color: col,
+          lineWidth: 1,
+          lineStyle: 2,
+          axisLabelVisible: false,
+          title: `${ev.name ?? ev.event ?? "NEWS"} (${isHigh ? "H" : "M"})`,
+        }));
+      } catch {}
+    }
+    newsLinesRef.current = lines as never[];
+    } catch { /* chart disposed */ }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showNews, newsData, chartReady]);
+
+  // ── FU candle markers ────────────────────────────────────────────────────
+  useEffect(() => {
+    const s = seriesInst.current;
+    const lc = lcRef.current;
+    if (!s || !lc || !chartReady || !showFU) {
+      if (fuMarkersRef.current) {
+        try { fuMarkersRef.current.setMarkers?.([]); fuMarkersRef.current.detach?.(); } catch {}
+        fuMarkersRef.current = null;
+      }
+      return;
+    }
+    const candles = displayCandlesRef.current;
+    if (!candles.length) return;
+
+    // Client-side FU detection: a candle whose wick is >= 2× body size on one side,
+    // body in lower/upper 25% of the candle range, and close reverses prior candle.
+    const markers: { time: number; position: string; color: string; shape: string; text: string; size: number }[] = [];
+    for (let i = 1; i < candles.length; i++) {
+      const c    = candles[i];
+      const body = Math.abs(c.close - c.open);
+      const rng  = c.high - c.low;
+      if (rng === 0) continue;
+      const upperWick = c.high - Math.max(c.open, c.close);
+      const lowerWick = Math.min(c.open, c.close) - c.low;
+      const entry50   = (c.open + c.close) / 2;
+      // Bullish FU: long lower wick (wick >= 2×body), closes near top
+      if (lowerWick >= 2 * body && lowerWick / rng >= 0.5 && c.close > c.open) {
+        markers.push({ time: c.time, position: "belowBar", color: "#3aaa72", shape: "arrowUp",   text: "FU↑", size: 1 });
+        void entry50; // used for labeling only — lightweight-charts sets position via barRef
+      }
+      // Bearish FU: long upper wick, closes near bottom
+      if (upperWick >= 2 * body && upperWick / rng >= 0.5 && c.close < c.open) {
+        markers.push({ time: c.time, position: "aboveBar", color: "#cf4e4e", shape: "arrowDown", text: "FU↓", size: 1 });
+      }
+    }
+    markers.sort((a, b) => a.time - b.time);
+
+    try {
+      if (lc.createSeriesMarkers) {
+        if (fuMarkersRef.current) {
+          fuMarkersRef.current.setMarkers(markers);
+        } else {
+          fuMarkersRef.current = lc.createSeriesMarkers(s, markers);
+        }
+      } else {
+        s.setMarkers?.(markers);
+      }
+    } catch {}
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showFU, displayCandles, chartReady]);
+
+  // ── Session bands ────────────────────────────────────────────────────────
+  useEffect(() => {
+    const chart = chartInst.current;
+    const lc    = lcRef.current;
+    if (!chart || !lc || !chartReady) return;
+
+    // Tear down old session series
+    for (const ss of sessionSeriesRef.current) {
+      try { chart.removeSeries(ss); } catch {}
+    }
+    sessionSeriesRef.current = [];
+
+    if (!showSessions) return;
+
+    const candles = displayCandlesRef.current;
+    if (!candles.length) return;
+
+    const { LineSeries } = lc;
+    if (!LineSeries) return;
+
+    // For each candle, check if its UTC time falls in a session window.
+    // We create two transparent line series (price=0) with different colors
+    // and attach series markers to create visual bands. Since lightweight-charts
+    // doesn't support native background bands, we approximate by drawing
+    // semi-transparent histogram-style markers per session candle.
+    const nyData:  { time: number; value: number }[] = [];
+    const lonData: { time: number; value: number }[] = [];
+
+    for (const c of candles) {
+      const d    = new Date(c.time * 1000);
+      const hUtc = d.getUTCHours();
+      const mUtc = d.getUTCMinutes();
+      const minUtc = hUtc * 60 + mUtc;
+      // NY PRIMARY: 14:00–16:00 UTC (9–11 AM EST)
+      if (minUtc >= 14 * 60 && minUtc < 16 * 60) nyData.push({ time: c.time, value: c.close });
+      // London open: 08:00–09:30 UTC
+      if (minUtc >= 8 * 60 && minUtc < 9 * 60 + 30) lonData.push({ time: c.time, value: c.close });
+    }
+
+    // NY series — amber
+    if (nyData.length) {
+      try {
+        const nySeries = chart.addSeries(LineSeries, {
+          color: "#cfad4e22",
+          lineWidth: 8,
+          priceLineVisible: false,
+          lastValueVisible: false,
+          crosshairMarkerVisible: false,
+        }, 0);
+        nySeries.setData(nyData);
+        sessionSeriesRef.current.push(nySeries);
+      } catch {}
+    }
+    // London series — blue
+    if (lonData.length) {
+      try {
+        const lonSeries = chart.addSeries(LineSeries, {
+          color: "#3a6eaa22",
+          lineWidth: 8,
+          priceLineVisible: false,
+          lastValueVisible: false,
+          crosshairMarkerVisible: false,
+        }, 0);
+        lonSeries.setData(lonData);
+        sessionSeriesRef.current.push(lonSeries);
+      } catch {}
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showSessions, displayCandles, chartReady]);
+
+  // ── ATR line overlay ─────────────────────────────────────────────────────
+  useEffect(() => {
+    const chart = chartInst.current;
+    const lc    = lcRef.current;
+    if (!chart || !lc || !chartReady) return;
+
+    if (atrSeriesRef.current) {
+      try { chart.removeSeries(atrSeriesRef.current); } catch {}
+      atrSeriesRef.current = null;
+    }
+    if (!showATR) return;
+
+    const candles = displayCandlesRef.current;
+    if (!candles.length) return;
+
+    const data = atrLine(candles, 14);
+    if (!data.length) return;
+
+    const { LineSeries } = lc;
+    if (!LineSeries) return;
+
+    try {
+      const s = chart.addSeries(LineSeries, {
+        color:                  "rgba(130,90,200,0.5)",
+        lineWidth:              1,
+        lineStyle:              1, // dashed
+        priceLineVisible:       false,
+        lastValueVisible:       true,
+        crosshairMarkerVisible: false,
+      }, 0);
+      s.setData(data);
+      atrSeriesRef.current = s;
+    } catch {}
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showATR, displayCandles, chartReady]);
+
   const toggle = (k: IndKey) => setInd((p) => ({ ...p, [k]: !p[k] }));
 
   return (
@@ -869,6 +1204,37 @@ export default function ChartPanel({ liveCandles, prices, entryPrice, advanced =
                 border: `1px solid ${ind[key] ? "#1c3a5a" : "#1c1c1c"}`,
                 cursor: "pointer",
                 color: ind[key] ? "#4e8ecf" : "#555",
+                padding: "2px 6px",
+                borderRadius: 2,
+              }}
+            >
+              {label}
+            </button>
+          ))}
+
+          <div style={{ width: 1, height: 12, background: "#1c1c1c", margin: "0 2px" }} />
+
+          {/* Overlay chips */}
+          {(
+            [
+              { label: "OB",       active: showOB,       set: setShowOB       },
+              { label: "FVG",      active: showFVG,      set: setShowFVG      },
+              { label: "FU",       active: showFU,       set: setShowFU       },
+              { label: "Sessions", active: showSessions, set: setShowSessions },
+              { label: "News",     active: showNews,     set: setShowNews     },
+              { label: "ATR",      active: showATR,      set: setShowATR      },
+            ] as { label: string; active: boolean; set: (v: boolean) => void }[]
+          ).map(({ label, active, set }) => (
+            <button
+              key={label}
+              onClick={() => set(!active)}
+              style={{
+                fontFamily: "var(--font-mono), 'IBM Plex Mono', monospace",
+                fontSize: 9,
+                background: active ? "#18150a" : "none",
+                border: `1px solid ${active ? "#3a3010" : "#1c1c1c"}`,
+                cursor: "pointer",
+                color: active ? "#cfad4e" : "#555",
                 padding: "2px 6px",
                 borderRadius: 2,
               }}

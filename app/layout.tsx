@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { IBM_Plex_Mono, Inter } from "next/font/google";
 import "./globals.css";
 
@@ -15,8 +15,14 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "MEGALPHA",
-  description: "Quantitative trading platform",
+  title: "CORTISOL",
+  description: "Quantitative trading terminal",
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",   // enables safe-area-inset-* env vars for iPhone notch
 };
 
 export default function RootLayout({

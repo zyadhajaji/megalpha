@@ -45,6 +45,7 @@ export default function DataHubPage({ hl }: { hl: HLStreamData }) {
   const [chartLoading, setChartLoading] = useState(false);
   const chartRef  = useRef<HTMLDivElement>(null);
   const chartInst = useRef<unknown>(null);
+  const roRef     = useRef<ResizeObserver | null>(null);
 
   // Fetch funding history whenever coin or window changes
   useEffect(() => {
@@ -111,30 +112,41 @@ export default function DataHubPage({ hl }: { hl: HLStreamData }) {
       chartInst.current = chart;
 
       const ro = new ResizeObserver(() => {
-        if (chartRef.current && chartInst.current) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          (chartInst.current as any).applyOptions({
-            width:  chartRef.current.clientWidth,
-            height: chartRef.current.clientHeight,
-          });
-        }
+        try {
+          if (chartRef.current && chartInst.current) {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (chartInst.current as any).applyOptions({
+              width:  chartRef.current.clientWidth,
+              height: chartRef.current.clientHeight,
+            });
+          }
+        } catch { /* chart disposed */ }
       });
       ro.observe(chartRef.current);
+      roRef.current = ro;
     })();
 
-    return () => { destroyed = true; };
+    return () => {
+      destroyed = true;
+      if (roRef.current) { roRef.current.disconnect(); roRef.current = null; }
+    };
   }, [fundingData]);
 
   useEffect(() => () => {
+    if (roRef.current) { roRef.current.disconnect(); roRef.current = null; }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    if (chartInst.current) { (chartInst.current as any).remove(); chartInst.current = null; }
+    if (chartInst.current) { try { (chartInst.current as any).remove(); } catch {} chartInst.current = null; }
   }, []);
 
   return (
-    <div style={{ height: "100%", padding: 12, display: "flex", flexDirection: "column", gap: 12, overflow: "auto" }}>
+    <div style={{
+      height: "100%", padding: 12, display: "flex", flexDirection: "column", gap: 12, overflow: "auto",
+      WebkitOverflowScrolling: "touch",
+      paddingBottom: "calc(var(--bottom-nav-h, 56px) + env(safe-area-inset-bottom, 0px) + 12px)",
+    }}>
 
       {/* ── Metric cards row ── */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, flexShrink: 0 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12, flexShrink: 0 }}>
         {COINS.map((coin) => (
           <MetricCard key={coin} coin={coin} data={metrics?.[coin] ?? null} />
         ))}
@@ -159,7 +171,7 @@ export default function DataHubPage({ hl }: { hl: HLStreamData }) {
           {chartLoading && <span style={{ fontFamily: mono, fontSize: 9, color: "#333" }}>loading…</span>}
         </div>
         {fundingData.length < 2 && !chartLoading ? (
-          <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: mono, fontSize: 10, color: "#2a2a2a" }}>
+          <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: mono, fontSize: 10, color: "#555" }}>
             bridge offline — funding history unavailable
           </div>
         ) : (
@@ -177,9 +189,9 @@ export default function DataHubPage({ hl }: { hl: HLStreamData }) {
         </div>
         <div style={{ flex: 1, overflowY: "auto" }}>
           {liquidations.length === 0 ? (
-            <div style={{ padding: 16, fontFamily: mono, fontSize: 10, color: "#2a2a2a", lineHeight: 1.8 }}>
+            <div style={{ padding: 16, fontFamily: mono, fontSize: 10, color: "#555", lineHeight: 1.8 }}>
               No liquidations yet this session.<br />
-              <span style={{ fontSize: 9, color: "#1e1e1e" }}>Events appear here in real-time as they happen on-chain.</span>
+              <span style={{ fontSize: 9, color: "#444" }}>Events appear here in real-time as they happen on-chain.</span>
             </div>
           ) : (
             liquidations.slice().reverse().map((liq, i) => (
@@ -227,7 +239,7 @@ function MetricCard({ coin, data }: { coin: string; data: MarketMetric | null })
           </div>
         </>
       ) : (
-        <div style={{ fontFamily: mono, fontSize: 10, color: "#2a2a2a", paddingTop: 6 }}>bridge offline</div>
+        <div style={{ fontFamily: mono, fontSize: 10, color: "#555", paddingTop: 6 }}>bridge offline</div>
       )}
     </div>
   );
@@ -236,7 +248,7 @@ function MetricCard({ coin, data }: { coin: string; data: MarketMetric | null })
 function MiniStat({ label, value, color }: { label: string; value: string; color?: string }) {
   return (
     <div>
-      <div style={{ fontFamily: mono, fontSize: 8, color: "#3a3a3a", marginBottom: 2 }}>{label.toUpperCase()}</div>
+      <div style={{ fontFamily: mono, fontSize: 8, color: "#555", marginBottom: 2 }}>{label.toUpperCase()}</div>
       <div style={{ fontFamily: sans, fontWeight: 600, fontSize: 13, color: color ?? "#e8e8e8" }}>{value}</div>
     </div>
   );
@@ -276,7 +288,7 @@ function LiqRow({ liq }: { liq: HLLiquidation }) {
         {fmtTime(liq.time)}
       </div>
       {liq.user && (
-        <div style={{ fontFamily: mono, fontSize: 8, color: "#2a2a2a", flexShrink: 0 }}>
+        <div style={{ fontFamily: mono, fontSize: 8, color: "#555", flexShrink: 0 }}>
           {liq.user}…
         </div>
       )}

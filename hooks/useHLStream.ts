@@ -12,6 +12,7 @@ interface HLPrices {
   eth: number;
   sol: number;
   paxg: number;
+  xauusd?: number;
 }
 
 export interface OrderBookLevel {

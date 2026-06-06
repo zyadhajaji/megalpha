@@ -17,7 +17,7 @@ interface SavedStrategy { name: string; slug: string; }
 const STRAT_GROUPS: { label: string; items: Strategy[] }[] = [
   { label: "MEGA STRATEGIES", items: ["stop_hunt_a", "trend_follow_b", "sniper_c", "unified_d"] },
   { label: "STRUCTURAL",      items: ["supply_demand", "sl_hunt", "valued_risk"] },
-  { label: "CLASSIC",         items: ["agent", "momentum", "breakout", "mean_reversion", "ema_cross", "macd", "bollinger"] },
+  { label: "CLASSIC",         items: ["momentum", "breakout", "mean_reversion", "ema_cross", "macd", "bollinger"] },
 ];
 
 const STRATEGIES: Strategy[] = [
@@ -143,7 +143,7 @@ function fmtTime(unix: number): string {
 export default function BacktestPage() {
   const [coin, setCoin]         = useState<Coin>("ETH");
   const [interval, setInterval] = useState<Interval>("4h");
-  const [strategy, setStrategy] = useState<Strategy>("agent");
+  const [strategy, setStrategy] = useState<Strategy>("momentum");
   const [balance, setBalance]   = useState("10000");
   const [sizeUsd, setSizeUsd]   = useState("200");
   const [leverage, setLeverage] = useState("5");
@@ -355,7 +355,12 @@ export default function BacktestPage() {
   useEffect(() => () => { if (chartInst.current) { chartInst.current.remove(); chartInst.current = null; } }, []);
 
   return (
-    <div style={{ height: "100%", display: "flex", flexDirection: "column", padding: 12, gap: 12, overflow: "hidden" }}>
+    <div style={{
+      height: "100%", display: "flex", flexDirection: "column", padding: 12, gap: 12,
+      overflowY: "auto", overflowX: "hidden",
+      WebkitOverflowScrolling: "touch",
+      paddingBottom: "calc(var(--bottom-nav-h, 56px) + env(safe-area-inset-bottom, 0px) + 12px)",
+    }}>
 
       {/* Controls */}
       <div className="panel" style={{ padding: "10px 14px", display: "flex", alignItems: "center", gap: 14, flexShrink: 0, flexWrap: "wrap" }}>
@@ -521,9 +526,9 @@ export default function BacktestPage() {
           </div>
         </div>
       ) : !loading ? (
-        <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: mono, fontSize: 11, color: "#2a2a2a", textAlign: "center", lineHeight: 1.8 }}>
+        <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: mono, fontSize: 11, color: "#555", textAlign: "center", lineHeight: 1.8 }}>
           configure parameters above and press RUN BACKTEST<br />
-          <span style={{ fontSize: 9, color: "#222" }}>costs (slippage + funding) are on by default · set risk %s to enable stop / kill-switch / sizing</span>
+          <span style={{ fontSize: 9, color: "#444" }}>costs (slippage + funding) are on by default · set risk %s to enable stop / kill-switch / sizing</span>
         </div>
       ) : (
         <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: mono, fontSize: 11, color: "#333" }}>

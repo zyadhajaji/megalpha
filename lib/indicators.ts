@@ -247,3 +247,22 @@ export function bbWidth(candles: Candle[], period = 20): LinePoint[] {
 export function ema21(candles: Candle[]): LinePoint[] { return ema(candles, 21); }
 export function ema55(candles: Candle[]): LinePoint[] { return ema(candles, 55); }
 export function ema200(candles: Candle[]): LinePoint[] { return ema(candles, 200); }
+
+// ATR(period) — returned as `close - atr` so it renders as a line below price.
+export function atrLine(candles: Candle[], period = 14): LinePoint[] {
+  if (candles.length < period + 1) return [];
+  const trs: number[] = [];
+  for (let i = 1; i < candles.length; i++) {
+    const c = candles[i], prev = candles[i - 1];
+    trs.push(Math.max(c.high - c.low, Math.abs(c.high - prev.close), Math.abs(c.low - prev.close)));
+  }
+  // Wilder's smoothing (initial = simple average)
+  let atr = trs.slice(0, period).reduce((s, v) => s + v, 0) / period;
+  const out: LinePoint[] = [];
+  for (let i = period; i < trs.length; i++) {
+    atr = (atr * (period - 1) + trs[i]) / period;
+    const candle = candles[i + 1]; // +1 because trs[0] corresponds to candles[1]
+    out.push({ time: candle.time, value: candle.close - atr });
+  }
+  return out;
+}

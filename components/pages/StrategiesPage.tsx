@@ -1,1141 +1,1068 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { BRIDGE_HTTP } from "@/lib/bridge";
-import { AISignalPanel } from "./SignalsPage";
 
+// ── Design tokens ─────────────────────────────────────────────────────────────
 const mono = "var(--font-mono, 'IBM Plex Mono', monospace)";
 const sans = "var(--font-sans, Inter, sans-serif)";
-const GREEN = "#4ecf8a", RED = "#cf4e4e", BLUE = "#4e8ecf", AMBER = "#cfad4e";
+const GREEN  = "#4ecf8a";
+const GREEN2 = "#3aaa72";
+const RED    = "#cf4e4e";
+const RED2   = "#aa3a3a";
+const BLUE   = "#4e8ecf";
+const AMBER  = "#cfad4e";
+const BG     = "#070707";
+const SURF   = "#0c0c0c";
+const BORDER = "#1c1c1c";
+const TEXT   = "#e8e8e8";
+const SUB    = "#999";
+const DIM    = "#666";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-type Coin     = "BTC" | "ETH" | "SOL" | "PAXG";
-type Interval = "1h" | "4h";
-type StratKey = "A" | "B" | "C" | "D";
-
-interface RegimeCoin {
-  state:       "RANGING" | "TRENDING" | "TRANSITION" | "HALTED";
-  adx:         number;
-  bb_width:    number;
-  ma_sep:      number;
-  score:       number;
-  consecutive: number;
+interface ConditionBar {
+  label: string;
+  points: number;
+  possible: number;
 }
 
-interface StratResult {
-  direction:   "long" | "short";
-  score?:      number;
-  entry?:      number;
-  sl?:         number;
-  tp1?:        number;
-  tp2?:        number;
-  tp3?:        number;
-  rr?:         number;
-  min_rr?:     number;
-  conditions?: Record<string, boolean | number | string>;
-  [key: string]: unknown;
+interface SignalA {
+  direction: "LONG" | "SHORT" | "NEUTRAL";
+  confidence: number;
+  entry: number | null;
+  sl: number | null;
+  tp1: number | null;
+  rr: number | null;
+  conditions: ConditionBar[];
+  updated_at: number;
+  signal_id?: string;
 }
 
-interface ScanResult {
-  A:        StratResult | null;
-  B:        StratResult | null;
-  C:        StratResult | null;
-  D:        StratResult | null;
-  regime:   RegimeCoin;
-  coin:     string;
-  interval: string;
-  candles:  number;
+interface SignalB {
+  direction: "LONG" | "SHORT" | "NEUTRAL";
+  confidence: number;
+  entry: number | null;
+  sl: number | null;
+  tp1: number | null;
+  rr: number | null;
+  conditions: ConditionBar[];
+  updated_at: number;
+  signal_id?: string;
 }
 
-type ExecMode   = "stopped" | "paper" | "live";
-type ExecBroker = "hl" | "mt5" | "both";
-
-interface AutoExecStatus {
-  mode:            ExecMode;
-  broker:          ExecBroker;
-  hl_configured:   boolean;
-  mt5_configured:  boolean;
-  live_halted:  boolean;
-  next_scan_ts: number;
-  secs_to_scan: number;
-  log:          AutoExecEntry[];
-  paper: {
-    equity:    number;
-    start:     number;
-    pnl:       number;
-    positions: Record<string, PaperPosition>;
-    trades:    PaperTrade[];
-  };
+interface SignalC {
+  direction: "LONG" | "SHORT" | "NEUTRAL";
+  confidence: number;
+  entry: number | null;
+  sl: number | null;
+  tp1: number | null;
+  rr: number | null;
+  conditions: ConditionBar[];
+  updated_at: number;
+  signal_id?: string;
 }
 
-interface AutoExecEntry {
-  ts:         number;
-  coin:       string;
-  interval:   string;
-  direction:  "LONG" | "SHORT";
-  entry:      number;
-  sl:         number;
-  tp:         number;
-  strategies: string[];
-  mode:       string;
-  ok:         boolean;
-  error?:     string;
+interface SignalD {
+  score: number;
+  direction: "LONG" | "SHORT" | "NEUTRAL";
+  priority: "MAX" | "STANDARD" | "WEAK";
+  entry: number | null;
+  sl: number | null;
+  tp1: number | null;
+  tp2: number | null;
+  tp3: number | null;
+  lot_size: number | null;
+  phase: 1 | 2 | 3;
+  conditions: ConditionBar[];
+  updated_at: number;
+  signal_id?: string;
 }
 
-interface PaperPosition {
-  direction: "LONG" | "SHORT";
-  entry:     number;
-  sl:        number;
-  tp:        number;
-  size_usd:  number;
-  leverage:  number;
-  opened_at: number;
-  strategy:  string;
+interface SignalLiveResponse {
+  asset: string;
+  price: number;
+  session: string;
+  is_primary_window: boolean;
+  regime: string;
+  bias: string;
+  news_flag: boolean;
+  blackout_active: boolean;
+  volume_ratio?: number;
+  trade_quality?: "PRIME" | "GOOD" | "CAUTION" | "AVOID";
+  signal_a: SignalA | null;
+  signal_b: SignalB | null;
+  signal_c: SignalC | null;
+  signal_d: SignalD | null;
 }
 
-interface PaperTrade {
-  coin:       string;
-  direction:  string;
-  entry:      number;
-  exit:       number;
-  pnl_usd:   number;
-  result:     "TP" | "SL";
-  opened_at:  number;
-  closed_at:  number;
-  strategy:   string;
+interface SessionStatus {
+  session: string;
+  ny_open_secs: number;    // seconds until NY open (negative = already open)
+  ny_close_secs: number;   // seconds until NY close
+  is_primary_window: boolean;
+  news_events: NewsEvent[];
+  time_utc: string;
 }
 
-interface Consensus {
-  direction:  "LONG" | "SHORT";
-  strategies: string[];
-  bestStrat:  string;
-  bestScore:  number;
-  bestEntry:  number;
-  bestSL:     number;
-  bestTP:     number;
+interface NewsEvent {
+  title: string;
+  impact: "HIGH" | "MEDIUM" | "LOW";
+  mins_until: number;
 }
 
-interface ConfirmState {
-  strat:     string;
-  direction: "LONG" | "SHORT";
-  entry:     number;
-  sl:        number;
-  tp:        number;
-  coin:      string;
+interface IBSummary {
+  today_lots: number;
+  today_rebate_usd: number;
+  monthly_lots: number;
+  monthly_rebate_usd: number;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function regimeColor(state: string) {
-  if (state === "TRENDING")   return GREEN;
-  if (state === "RANGING")    return AMBER;
-  if (state === "HALTED")     return RED;
-  return "#555";
+function fmtPx(n: number | null | undefined): string {
+  if (n == null || !isFinite(n)) return "—";
+  return "$" + n.toLocaleString("en-US", { maximumFractionDigits: n > 100 ? 1 : 4 });
 }
 
-function regimeBg(state: string) {
-  if (state === "TRENDING")   return "rgba(78,207,138,0.07)";
-  if (state === "RANGING")    return "rgba(207,173,78,0.07)";
-  if (state === "HALTED")     return "rgba(207,78,78,0.1)";
-  return "transparent";
+function fmtSecs(secs: number): string {
+  const abs = Math.abs(secs);
+  const h = Math.floor(abs / 3600);
+  const m = Math.floor((abs % 3600) / 60);
+  const s = abs % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
 }
 
-function stratColor(s: StratKey) {
-  return s === "A" ? AMBER : s === "B" ? GREEN : s === "C" ? RED : BLUE;
+function timeAgo(ts: number): string {
+  const s = Math.floor(Date.now() / 1000 - ts);
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  return `${Math.floor(s / 3600)}h ago`;
 }
 
-function stratActive(state: string, s: StratKey) {
-  if (s === "C" || s === "D") return true;
-  if (s === "A") return state === "RANGING" || state === "TRANSITION";
-  if (s === "B") return state === "TRENDING" || state === "TRANSITION";
-  return false;
+function sessionColor(session: string): string {
+  if (session === "NY_PRIMARY") return AMBER;
+  if (session === "LONDON_OPEN") return BLUE;
+  if (session === "ASIA") return "#444";
+  return DIM;
 }
 
-function fmtPx(n: unknown) {
-  const v = Number(n);
-  if (!v || !isFinite(v)) return "—";
-  return "$" + v.toLocaleString("en-US", { maximumFractionDigits: v > 100 ? 1 : 4 });
+function directionColor(dir: string): string {
+  if (dir === "LONG")    return GREEN;
+  if (dir === "SHORT")   return RED;
+  return SUB;
 }
 
-function getConsensus(result: ScanResult | null): Consensus | null {
-  if (!result) return null;
-  const keys: StratKey[] = ["A", "B", "C", "D"];
-  const longs: StratKey[]  = [];
-  const shorts: StratKey[] = [];
-  for (const k of keys) {
-    const r = result[k];
-    if (!r) continue;
-    if (r.direction === "long")  longs.push(k);
-    if (r.direction === "short") shorts.push(k);
-  }
-  const winners = longs.length >= 2 ? longs : shorts.length >= 2 ? shorts : null;
-  if (!winners) return null;
-  const dir = longs.length >= 2 ? "LONG" : "SHORT";
-  const sorted = winners
-    .map(k => ({ k, r: result[k] as StratResult }))
-    .sort((a, b) => ((b.r.score ?? b.r.rr ?? 0) - (a.r.score ?? a.r.rr ?? 0)));
-  const best = sorted[0];
-  return {
-    direction:  dir,
-    strategies: winners,
-    bestStrat:  best.k,
-    bestScore:  best.r.score ?? 0,
-    bestEntry:  best.r.entry ?? 0,
-    bestSL:     best.r.sl ?? 0,
-    bestTP:     best.r.tp1 ?? 0,
-  };
+function scoreColor(score: number): string {
+  if (score >= 80) return GREEN;
+  if (score >= 60) return AMBER;
+  return SUB;
 }
 
-// ── Sub-components ────────────────────────────────────────────────────────────
+// ── Conditions Bar ────────────────────────────────────────────────────────────
 
-function Stat({ label, value, color }: { label: string; value: string; color?: string }) {
-  return (
-    <div>
-      <div style={{ fontFamily: mono, fontSize: 7, color: "#2a2a2a", letterSpacing: "0.06em", marginBottom: 1 }}>
-        {label}
-      </div>
-      <div style={{ fontFamily: mono, fontSize: 11, fontWeight: 600, color: color ?? "#888" }}>
-        {value}
-      </div>
-    </div>
-  );
-}
+function ConditionsBar({ liveAll, sessionSt }: { liveAll: SignalLiveResponse[]; sessionSt: SessionStatus | null }) {
+  const quality = liveAll[0]?.trade_quality;
+  const blackout = liveAll.some(d => d.blackout_active);
+  const newsFlag = liveAll.some(d => d.news_flag);
+  const qColor = quality === "PRIME" ? GREEN : quality === "GOOD" ? "#4e8ecf" : quality === "CAUTION" ? AMBER : RED;
+  const qLabel = quality ?? "—";
 
-function RegimeStrip({ regime }: { regime: Record<Coin, RegimeCoin> | null }) {
-  const coins: Coin[] = ["BTC", "ETH", "SOL"];
+  // Volume across assets
+  const volRatios = liveAll.map(d => d.volume_ratio ?? 1.0);
+  const avgVol = volRatios.length ? volRatios.reduce((a, b) => a + b, 0) / volRatios.length : 1.0;
+  const volLabel = avgVol < 0.6 ? "LOW VOL" : avgVol > 2.0 ? "HIGH VOL" : "NORMAL VOL";
+  const volColor = avgVol < 0.6 ? AMBER : avgVol > 2.0 ? GREEN : SUB;
+
+  const isPrimary = sessionSt?.is_primary_window;
+
   return (
     <div style={{
-      height: 36, flexShrink: 0,
-      background: "#0c0c0c",
-      borderBottom: "1px solid #1a1a1a",
-      display: "flex", alignItems: "center",
-      padding: "0 14px", gap: 8,
+      display: "flex", alignItems: "center", gap: 10, flexShrink: 0,
+      padding: "5px 14px", background: "#060606", borderBottom: `1px solid ${BORDER}`,
     }}>
-      <span style={{ fontFamily: mono, fontSize: 8, color: "#2a2a2a", letterSpacing: "0.10em", marginRight: 4 }}>
-        REGIME
+      {/* Trade quality */}
+      <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+        <span style={{ fontFamily: mono, fontSize: 7, color: SUB, letterSpacing: "0.08em" }}>TRADE NOW</span>
+        <span style={{
+          fontFamily: mono, fontSize: 9, fontWeight: 700, color: qColor,
+          background: `${qColor}14`, border: `1px solid ${qColor}33`,
+          borderRadius: 3, padding: "1px 8px",
+        }}>{qLabel}</span>
+      </div>
+
+      <div style={{ width: 1, height: 12, background: BORDER }} />
+
+      {/* Session */}
+      <span style={{ fontFamily: mono, fontSize: 8, color: isPrimary ? AMBER : DIM }}>
+        {isPrimary ? "⬥ NY PRIMARY WINDOW" : sessionSt ? sessionSt.session.replace(/_/g, " ") : "—"}
       </span>
-      {regime ? coins.map(coin => {
-        const r = regime[coin];
-        if (!r) return null;
-        const col = regimeColor(r.state);
-        const activeStrats = (["A","B","C","D"] as StratKey[]).filter(s => stratActive(r.state, s));
-        return (
-          <div key={coin} style={{
-            display: "flex", alignItems: "center", gap: 6,
-            background: regimeBg(r.state),
-            border: `1px solid ${col}22`,
-            borderRadius: 3, padding: "3px 8px",
-          }}>
-            <span style={{ fontFamily: mono, fontSize: 9, fontWeight: 700, color: "#e8e8e8" }}>{coin}</span>
-            <span style={{
-              fontFamily: mono, fontSize: 8, fontWeight: 700, color: col,
-              background: `${col}18`, border: `1px solid ${col}33`,
-              borderRadius: 2, padding: "1px 5px",
-            }}>{r.state}</span>
-            <span style={{ fontFamily: mono, fontSize: 8, color: col }}>ADX {r.adx.toFixed(0)}</span>
-            <div style={{ display: "flex", gap: 2 }}>
-              {(["A","B","C","D"] as StratKey[]).map(s => {
-                const on = activeStrats.includes(s);
-                const sc = stratColor(s);
-                return (
-                  <span key={s} style={{
-                    fontFamily: mono, fontSize: 7,
-                    color: on ? sc : "#2a2a2a",
-                    background: on ? `${sc}18` : "transparent",
-                    border: `1px solid ${on ? `${sc}33` : "#1a1a1a"}`,
-                    borderRadius: 2, padding: "0px 3px",
-                  }}>{s}</span>
-                );
-              })}
-            </div>
-          </div>
-        );
-      }) : (
-        <span style={{ fontFamily: mono, fontSize: 8, color: "#2a2a2a" }}>Loading…</span>
+
+      <div style={{ width: 1, height: 12, background: BORDER }} />
+
+      {/* Volume */}
+      <span style={{ fontFamily: mono, fontSize: 8, color: volColor, fontWeight: 700 }}>
+        {volLabel} <span style={{ fontWeight: 400, color: DIM }}>({avgVol.toFixed(1)}×)</span>
+      </span>
+
+      {/* Warnings */}
+      {blackout && (
+        <span style={{
+          fontFamily: mono, fontSize: 7, color: RED,
+          background: "rgba(207,78,78,0.10)", border: "1px solid rgba(207,78,78,0.25)",
+          borderRadius: 3, padding: "1px 7px",
+        }}>■ NEWS BLACKOUT — NO ENTRIES</span>
+      )}
+      {!blackout && newsFlag && (
+        <span style={{
+          fontFamily: mono, fontSize: 7, color: AMBER,
+          background: "rgba(207,173,78,0.10)", border: "1px solid rgba(207,173,78,0.25)",
+          borderRadius: 3, padding: "1px 7px",
+        }}>⚡ POST-EVENT SCAN ACTIVE</span>
+      )}
+      {quality === "AVOID" && !blackout && (
+        <span style={{
+          fontFamily: mono, fontSize: 7, color: SUB,
+          background: "rgba(100,100,100,0.08)", border: "1px solid rgba(100,100,100,0.15)",
+          borderRadius: 3, padding: "1px 7px",
+        }}>Outside trading hours — monitoring only</span>
       )}
     </div>
   );
 }
 
-function ConsensusBanner({
-  consensus, coin, onExecute,
-}: {
-  consensus: Consensus;
-  coin: Coin;
-  onExecute: (c: Consensus) => void;
+// ── All-Assets Summary Grid ───────────────────────────────────────────────────
+
+function AllAssetsGrid({ liveAll, selected, onSelect }: {
+  liveAll: SignalLiveResponse[];
+  selected: string;
+  onSelect: (a: string) => void;
 }) {
-  const isLong = consensus.direction === "LONG";
-  const col = isLong ? GREEN : RED;
+  if (!liveAll.length) return null;
+
   return (
     <div style={{
-      background: isLong ? "rgba(78,207,138,0.06)" : "rgba(207,78,78,0.06)",
-      border: `1px solid ${col}33`,
-      borderLeft: `3px solid ${col}`,
-      borderRadius: 4, padding: "10px 13px",
-      display: "flex", alignItems: "center", gap: 12,
+      display: "grid", gridTemplateColumns: "repeat(4, 1fr)",
+      gap: 0, borderBottom: `1px solid ${BORDER}`, flexShrink: 0,
     }}>
-      <div style={{ flex: 1 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-          <span style={{ fontFamily: mono, fontSize: 11, fontWeight: 700, color: col }}>
-            {isLong ? "▲" : "▼"} CONSENSUS: {consensus.direction}
-          </span>
-          <span style={{ fontFamily: mono, fontSize: 8, color: "#555" }}>
-            Strategies {consensus.strategies.join(" + ")} agree
-          </span>
-        </div>
-        <div style={{ display: "flex", gap: 14 }}>
-          {consensus.bestEntry > 0 && (
-            <Stat label="ENTRY" value={fmtPx(consensus.bestEntry)} color="#e8e8e8" />
-          )}
-          {consensus.bestSL > 0 && (
-            <Stat label="SL" value={fmtPx(consensus.bestSL)} color={RED} />
-          )}
-          {consensus.bestTP > 0 && (
-            <Stat label="TP" value={fmtPx(consensus.bestTP)} color={GREEN} />
-          )}
-          <Stat label="LEAD" value={`Strategy ${consensus.bestStrat}`} color={stratColor(consensus.bestStrat as StratKey)} />
-        </div>
-      </div>
-      <button
-        onClick={() => onExecute(consensus)}
-        style={{
-          fontFamily: mono, fontSize: 9, fontWeight: 700,
-          padding: "6px 14px", borderRadius: 3, cursor: "pointer",
-          background: isLong ? "rgba(78,207,138,0.1)" : "rgba(207,78,78,0.1)",
-          border: `1px solid ${col}44`, color: col,
-          letterSpacing: "0.04em",
-          flexShrink: 0,
-        }}
-      >
-        EXECUTE ON HL →
-      </button>
-    </div>
-  );
-}
+      {ASSETS.map(asset => {
+        const d = liveAll.find(x => x.asset === asset);
+        const active = selected === asset;
+        const dScore = d?.signal_d?.score ?? null;
+        const dDir = d?.signal_d?.direction ?? d?.signal_a?.direction ?? null;
+        const hasSig = dScore != null && dScore >= 60;
+        const quality = d?.trade_quality;
+        const qColor = quality === "PRIME" ? GREEN : quality === "GOOD" ? "#4e8ecf" : quality === "CAUTION" ? AMBER : DIM;
 
-function ConditionDots({
-  conditions,
-  keys,
-  labels,
-}: {
-  conditions: Record<string, boolean | number | string>;
-  keys: string[];
-  labels: string[];
-}) {
-  return (
-    <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
-      {keys.map((k, i) => {
-        const val = conditions[k];
-        const passed = val === true || (typeof val === "number" && val > 0);
         return (
-          <span key={k} style={{
-            fontFamily: mono, fontSize: 8, padding: "1px 5px", borderRadius: 2,
-            background: passed ? "rgba(78,207,138,0.07)" : "#0c0c0c",
-            border: `1px solid ${passed ? "rgba(78,207,138,0.2)" : "#1c1c1c"}`,
-            color: passed ? "#3aaa72" : "#2a2a2a",
+          <button key={asset} onClick={() => onSelect(asset)} style={{
+            background: active ? `${BLUE}0c` : "transparent",
+            border: "none", borderRight: `1px solid ${BORDER}`,
+            borderBottom: active ? `2px solid ${BLUE}` : "2px solid transparent",
+            padding: "8px 10px", cursor: "pointer", textAlign: "left",
           }}>
-            {passed ? "✓" : "✗"} {labels[i]}
-          </span>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+              <span style={{ fontFamily: mono, fontSize: 9, fontWeight: 700, color: active ? TEXT : SUB }}>
+                {asset}
+              </span>
+              {hasSig && (
+                <span style={{
+                  fontFamily: mono, fontSize: 7, fontWeight: 700,
+                  color: scoreColor(dScore!),
+                  background: `${scoreColor(dScore!)}14`,
+                  border: `1px solid ${scoreColor(dScore!)}33`,
+                  borderRadius: 2, padding: "0px 5px",
+                }}>D:{dScore}</span>
+              )}
+              <div style={{ flex: 1 }} />
+              <span style={{ fontFamily: mono, fontSize: 7, color: qColor }}>{quality ?? "—"}</span>
+            </div>
+            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              {d?.price ? (
+                <span style={{ fontFamily: mono, fontSize: 8, color: DIM }}>
+                  ${d.price > 100 ? d.price.toLocaleString("en-US", { maximumFractionDigits: 1 }) : d.price.toFixed(4)}
+                </span>
+              ) : <span style={{ fontFamily: mono, fontSize: 8, color: "#1e1e1e" }}>—</span>}
+              {dDir && (
+                <span style={{
+                  fontFamily: mono, fontSize: 7, fontWeight: 700,
+                  color: dDir === "LONG" ? GREEN : dDir === "SHORT" ? RED : DIM,
+                }}>{dDir}</span>
+              )}
+              <span style={{ fontFamily: mono, fontSize: 7, color: "#555" }}>
+                {d?.regime ?? ""}
+              </span>
+            </div>
+            {/* Mini A/B/C indicator dots */}
+            <div style={{ display: "flex", gap: 3, marginTop: 4 }}>
+              {(["signal_a", "signal_b", "signal_c"] as const).map((k, i) => (
+                <div key={i} style={{
+                  width: 5, height: 5, borderRadius: "50%",
+                  background: d?.[k] ? (d[k]!.direction === "LONG" ? GREEN2 : d[k]!.direction === "SHORT" ? RED2 : "#333") : "#1a1a1a",
+                }} title={`Strategy ${["A","B","C"][i]}: ${d?.[k]?.direction ?? "no signal"}`} />
+              ))}
+              <span style={{ fontFamily: mono, fontSize: 6, color: "#555", marginLeft: 2 }}>A B C</span>
+            </div>
+          </button>
         );
       })}
     </div>
   );
 }
 
-function StrategyCard({
-  strat,
-  result,
-  coin,
-  onExecute,
-  executing,
-}: {
-  strat: StratKey;
-  result: StratResult | null;
-  coin: Coin;
-  onExecute: (strat: string, result: StratResult) => void;
-  executing: boolean;
-}) {
-  const col = stratColor(strat);
-  const NAMES: Record<StratKey, string> = {
-    A: "Stop-Hunt Sniper",
-    B: "EMA Cross Trend",
-    C: "FU Candle Sniper",
-    D: "Unified Sniper",
-  };
+// ── Sub-components ────────────────────────────────────────────────────────────
 
-  if (!result) {
+function PriceStat({ label, value, color }: { label: string; value: string; color?: string }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+      <span style={{ fontFamily: mono, fontSize: 7, color: "#555", letterSpacing: "0.08em" }}>
+        {label}
+      </span>
+      <span style={{ fontFamily: mono, fontSize: 11, fontWeight: 700, color: color ?? TEXT }}>
+        {value}
+      </span>
+    </div>
+  );
+}
+
+function CondBar({ bar }: { bar: ConditionBar }) {
+  const pct = bar.possible > 0 ? Math.min(100, (bar.points / bar.possible) * 100) : 0;
+  const filled = bar.points > 0;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <span style={{ fontFamily: sans, fontSize: 9, color: filled ? SUB : "#3a3a3a" }}>
+          {bar.label}
+        </span>
+        <span style={{ fontFamily: mono, fontSize: 8, color: filled ? GREEN2 : "#2a2a2a" }}>
+          {bar.points}/{bar.possible}
+        </span>
+      </div>
+      <div style={{ height: 3, background: "#141414", borderRadius: 2, overflow: "hidden" }}>
+        <div style={{
+          width: `${pct}%`,
+          height: "100%",
+          background: filled ? GREEN2 : "#1c1c1c",
+          borderRadius: 2,
+          transition: "width 0.4s",
+        }} />
+      </div>
+    </div>
+  );
+}
+
+function DirectionBadge({ dir }: { dir: string }) {
+  const col = directionColor(dir);
+  return (
+    <span style={{
+      fontFamily: mono, fontSize: 9, fontWeight: 700,
+      padding: "2px 8px", borderRadius: 2,
+      background: `${col}18`, border: `1px solid ${col}33`,
+      color: col, letterSpacing: "0.04em",
+    }}>
+      {dir === "LONG" ? "▲ LONG" : dir === "SHORT" ? "▼ SHORT" : "— NEUTRAL"}
+    </span>
+  );
+}
+
+// ── Strategy A / B / C card ───────────────────────────────────────────────────
+
+interface AbcCardProps {
+  label: string;
+  color: string;
+  signal: SignalA | SignalB | SignalC | null;
+}
+
+function AbcCard({ label, color, signal }: AbcCardProps) {
+  if (!signal) {
     return (
       <div style={{
-        display: "flex", alignItems: "center", gap: 10,
-        padding: "7px 11px",
-        background: "#090909",
-        border: "1px solid #131313",
-        borderLeft: `2px solid ${col}22`,
-        borderRadius: 3,
+        flex: 1, background: SURF,
+        border: `1px solid ${BORDER}`, borderLeft: `2px solid ${color}22`,
+        borderRadius: 4, padding: "12px 13px",
+        display: "flex", flexDirection: "column", gap: 0,
       }}>
-        <span style={{ fontFamily: mono, fontSize: 9, fontWeight: 700, color: col, width: 14 }}>{strat}</span>
-        <span style={{ fontFamily: mono, fontSize: 8, color: "#1e1e1e" }}>{NAMES[strat]}</span>
-        <span style={{ fontFamily: mono, fontSize: 8, color: "#1a1a1a", marginLeft: "auto" }}>
-          no signal
-        </span>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+          <span style={{ fontFamily: mono, fontSize: 8, fontWeight: 700, color, letterSpacing: "0.12em" }}>
+            STRAT {label}
+          </span>
+        </div>
+        <div style={{
+          flex: 1, display: "flex", alignItems: "center", justifyContent: "center",
+        }}>
+          <span style={{ fontFamily: mono, fontSize: 9, color: "#555", letterSpacing: "0.08em" }}>
+            NO SETUP
+          </span>
+        </div>
       </div>
     );
   }
 
-  const direction = result.direction === "long" ? "LONG" : "SHORT";
-  const isLong    = direction === "LONG";
-  const dirColor  = isLong ? GREEN : RED;
+  const conf = signal.confidence;
+  const confColor = conf >= 70 ? GREEN : conf >= 50 ? AMBER : SUB;
 
   return (
     <div style={{
-      padding: "10px 12px",
-      background: isLong ? "rgba(78,207,138,0.04)" : "rgba(207,78,78,0.04)",
-      border: `1px solid ${dirColor}22`,
-      borderLeft: `3px solid ${col}`,
-      borderRadius: 3,
-      display: "flex", flexDirection: "column", gap: 7,
+      flex: 1, background: SURF,
+      border: `1px solid ${BORDER}`, borderLeft: `3px solid ${color}`,
+      borderRadius: 4, padding: "12px 13px",
+      display: "flex", flexDirection: "column", gap: 8,
     }}>
-      {/* Header row */}
+      {/* Header */}
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <span style={{ fontFamily: mono, fontSize: 9, fontWeight: 700, color: col, width: 14 }}>{strat}</span>
-        <span style={{ fontFamily: mono, fontSize: 8, color: "#444" }}>{NAMES[strat]}</span>
-        <span style={{
-          fontFamily: mono, fontSize: 10, fontWeight: 700, color: dirColor,
-          background: `${dirColor}18`, border: `1px solid ${dirColor}33`,
-          borderRadius: 2, padding: "2px 8px",
-        }}>
-          {isLong ? "↑" : "↓"} {direction}
+        <span style={{ fontFamily: mono, fontSize: 8, fontWeight: 700, color, letterSpacing: "0.12em" }}>
+          STRAT {label}
         </span>
-        {result.score != null && (
-          <span style={{ fontFamily: mono, fontSize: 8, color: "#444" }}>
-            {result.score}/{strat === "A" ? 100 : strat === "D" ? 100 : "—"}pts
-          </span>
-        )}
+        <DirectionBadge dir={signal.direction} />
         <div style={{ flex: 1 }} />
-        <button
-          onClick={() => onExecute(strat, result)}
-          disabled={executing}
-          style={{
-            fontFamily: mono, fontSize: 8, fontWeight: 600,
-            padding: "3px 10px", borderRadius: 2,
-            cursor: executing ? "not-allowed" : "pointer",
-            background: executing ? "#0a0a0a" : (isLong ? "rgba(78,207,138,0.08)" : "rgba(207,78,78,0.08)"),
-            border: `1px solid ${executing ? "#1c1c1c" : `${dirColor}33`}`,
-            color: executing ? "#333" : dirColor,
-            opacity: executing ? 0.5 : 1,
-          }}
-        >
-          {executing ? "…" : "EXECUTE ON HL →"}
-        </button>
-      </div>
-
-      {/* Price levels */}
-      <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
-        {result.entry != null && <Stat label="ENTRY" value={fmtPx(result.entry)} color="#e8e8e8" />}
-        {result.sl    != null && <Stat label="SL"    value={fmtPx(result.sl)}    color={RED} />}
-        {result.tp1   != null && <Stat label="TP1"   value={fmtPx(result.tp1)}   color={GREEN} />}
-        {result.tp2   != null && <Stat label="TP2"   value={fmtPx(result.tp2)}   color="#3aaa72" />}
-        {(result.rr ?? result.min_rr) != null && (
-          <Stat label="R:R" value={`${Number(result.rr ?? result.min_rr).toFixed(1)}:1`} color={AMBER} />
-        )}
+        <span style={{ fontFamily: mono, fontSize: 9, fontWeight: 700, color: confColor }}>
+          {conf}%
+        </span>
       </div>
 
       {/* Conditions */}
-      {result.conditions && (
-        <>
-          {strat === "A" && (
-            <ConditionDots
-              conditions={result.conditions}
-              keys={["cond1_wick", "cond2_vol", "cond3_reclaim", "cond4_htf"]}
-              labels={["wick", "vol", "reclaim", "htf"]}
-            />
-          )}
-          {strat === "B" && (
-            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-              {result.conditions.adx_4h != null && (
-                <Stat label="ADX 4H" value={String(Number(result.conditions.adx_4h).toFixed(1))} color={GREEN} />
-              )}
-              {result.conditions.ema200_4h != null && (
-                <Stat label="EMA200 4H" value={fmtPx(result.conditions.ema200_4h)} color="#888" />
-              )}
-              {result.conditions.price_4h != null && (
-                <Stat label="PRICE 4H" value={fmtPx(result.conditions.price_4h)} color="#888" />
-              )}
-            </div>
-          )}
-          {strat === "D" && (
-            <ConditionDots
-              conditions={result.conditions}
-              keys={[
-                "cond1_wick","cond2_vol","cond3_reclaim","cond4_htf",
-                "cond5_fu_candle","cond6_orderblock","cond7_fvg","cond8_liq_density",
-              ]}
-              labels={["wick","vol","reclaim","htf","FU","OB","FVG","liq"]}
-            />
-          )}
-        </>
-      )}
-    </div>
-  );
-}
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        {signal.conditions.map((c, i) => <CondBar key={i} bar={c} />)}
+      </div>
 
-function ConfirmModal({
-  confirm,
-  executing,
-  execMsg,
-  onConfirm,
-  onCancel,
-}: {
-  confirm:   ConfirmState;
-  executing: boolean;
-  execMsg:   string | null;
-  onConfirm: () => void;
-  onCancel:  () => void;
-}) {
-  const isLong = confirm.direction === "LONG";
-  const col    = isLong ? GREEN : RED;
-
-  return (
-    <div style={{
-      position: "fixed", inset: 0,
-      background: "rgba(0,0,0,0.75)",
-      display: "flex", alignItems: "center", justifyContent: "center",
-      zIndex: 100,
-    }}>
-      <div style={{
-        background: "#0c0c0c",
-        border: "1px solid #2a2a2a",
-        borderTop: `2px solid ${col}`,
-        borderRadius: 6,
-        padding: "22px 26px",
-        minWidth: 320, maxWidth: 400,
-        display: "flex", flexDirection: "column", gap: 16,
-      }}>
-        <div style={{ fontFamily: mono, fontSize: 9, color: "#444", letterSpacing: "0.10em" }}>
-          CONFIRM TRADE — STRATEGY {confirm.strat}
-        </div>
-
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <span style={{ fontFamily: sans, fontWeight: 800, fontSize: 18, color: "#e8e8e8" }}>
-            {confirm.coin}
-          </span>
-          <span style={{
-            fontFamily: mono, fontSize: 12, fontWeight: 700, color: col,
-            background: `${col}18`, border: `1px solid ${col}33`,
-            borderRadius: 3, padding: "3px 10px",
-          }}>
-            {isLong ? "↑ LONG" : "↓ SHORT"}
-          </span>
-        </div>
-
-        <div style={{ display: "flex", gap: 20, borderTop: "1px solid #1a1a1a", paddingTop: 12 }}>
-          <Stat label="ENTRY" value={fmtPx(confirm.entry)} color="#e8e8e8" />
-          <Stat label="SL"    value={fmtPx(confirm.sl)}    color={RED} />
-          <Stat label="TP"    value={fmtPx(confirm.tp)}    color={GREEN} />
-        </div>
-
-        <div style={{
-          fontFamily: mono, fontSize: 8, color: "#555",
-          background: "#080808", border: "1px solid #1a1a1a",
-          borderRadius: 3, padding: "7px 9px",
-        }}>
-          Size: $50 · Leverage: 5× · post-only (ALO limit at best bid/ask)
-        </div>
-
-        {execMsg && (
-          <div style={{
-            fontFamily: mono, fontSize: 9,
-            color: execMsg.startsWith("✓") ? GREEN : RED,
-            background: execMsg.startsWith("✓") ? "rgba(78,207,138,0.07)" : "rgba(207,78,78,0.07)",
-            border: `1px solid ${execMsg.startsWith("✓") ? "rgba(78,207,138,0.2)" : "rgba(207,78,78,0.2)"}`,
-            borderRadius: 3, padding: "6px 9px",
-          }}>
-            {execMsg}
-          </div>
+      {/* Price levels */}
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", borderTop: `1px solid ${BORDER}`, paddingTop: 8 }}>
+        <PriceStat label="ENTRY" value={fmtPx(signal.entry)} color={TEXT} />
+        <PriceStat label="SL"    value={fmtPx(signal.sl)}    color={RED} />
+        <PriceStat label="TP1"   value={fmtPx(signal.tp1)}   color={GREEN} />
+        {signal.rr != null && (
+          <PriceStat label="R:R" value={`${signal.rr.toFixed(1)}:1`} color={AMBER} />
         )}
+      </div>
 
-        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-          <button onClick={onCancel} style={{
-            fontFamily: mono, fontSize: 10, padding: "6px 14px",
-            background: "none", border: "1px solid #2a2a2a",
-            borderRadius: 3, color: "#555", cursor: "pointer",
-          }}>
-            CANCEL
-          </button>
-          <button
-            onClick={onConfirm}
-            disabled={executing}
-            style={{
-              fontFamily: mono, fontSize: 10, fontWeight: 700, padding: "6px 16px",
-              background: executing ? "#0a0a0a" : (isLong ? "rgba(78,207,138,0.12)" : "rgba(207,78,78,0.12)"),
-              border: `1px solid ${executing ? "#1c1c1c" : `${col}44`}`,
-              borderRadius: 3, color: executing ? "#333" : col,
-              cursor: executing ? "not-allowed" : "pointer",
-            }}
-          >
-            {executing ? "PLACING…" : "CONFIRM & PLACE"}
-          </button>
+      {/* Footer */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div style={{ height: 4, flex: 1, background: "#141414", borderRadius: 2, overflow: "hidden", marginRight: 10 }}>
+          <div style={{
+            width: `${conf}%`, height: "100%", borderRadius: 2,
+            background: confColor, transition: "width 0.4s",
+          }} />
         </div>
+        <span style={{ fontFamily: mono, fontSize: 7, color: "#555", flexShrink: 0 }}>
+          {timeAgo(signal.updated_at)}
+        </span>
       </div>
     </div>
   );
 }
 
-// ── Auto-Exec Panel ───────────────────────────────────────────────────────────
+// ── Strategy D centre panel ───────────────────────────────────────────────────
 
-function AutoExecPanel({
-  status,
-  onSetMode,
-  onSetBroker,
-  setting,
-}: {
-  status:      AutoExecStatus | null;
-  onSetMode:   (mode: ExecMode) => void;
-  onSetBroker: (broker: ExecBroker) => void;
-  setting:     boolean;
-}) {
-  const mode       = status?.mode ?? "stopped";
-  const broker     = status?.broker ?? "hl";
-  const hlOk       = status?.hl_configured ?? false;
-  const mt5Ok      = status?.mt5_configured ?? false;
-  const halted     = status?.live_halted ?? false;
-  const secsLeft   = status?.secs_to_scan ?? 0;
-  const paperPnl   = status?.paper.pnl ?? 0;
-  const paperEq    = status?.paper.equity ?? 10000;
-  const positions  = status?.paper.positions ?? {};
-  const lastExec   = status?.log?.[0];
+interface StratDPanelProps {
+  signal: SignalD | null;
+  ibEquity: number | null;
+  onExecute: (signalId: string) => void;
+  executing: boolean;
+  execMsg: string | null;
+}
 
-  function minsLeft() {
-    const m = Math.floor(secsLeft / 60);
-    const s = secsLeft % 60;
-    return `${m}m ${s}s`;
+function StratDPanel({ signal, ibEquity, onExecute, executing, execMsg }: StratDPanelProps) {
+  if (!signal) {
+    return (
+      <div style={{
+        flex: 1, background: SURF, border: `1px solid ${BORDER}`,
+        borderRadius: 4, padding: "18px 18px",
+        display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10,
+      }}>
+        <span style={{ fontFamily: mono, fontSize: 8, color: "#1e1e1e", letterSpacing: "0.14em" }}>
+          STRATEGY D
+        </span>
+        <span style={{ fontFamily: mono, fontSize: 12, color: "#555" }}>NO SETUP</span>
+      </div>
+    );
   }
 
-  const modeColor: Record<ExecMode, string> = {
-    stopped: "#555",
-    paper:   AMBER,
-    live:    GREEN,
-  };
-  const col = modeColor[mode];
+  const sc = scoreColor(signal.score);
+  const dirCol = directionColor(signal.direction);
+  const priorityColors: Record<string, string> = { MAX: GREEN, STANDARD: AMBER, WEAK: SUB };
+  const priorityCol = priorityColors[signal.priority] ?? SUB;
+  const canExecute = signal.score >= 60;
+
+  const totalPoints = signal.conditions.reduce((a, c) => a + c.points, 0);
+  const totalPossible = signal.conditions.reduce((a, c) => a + c.possible, 0);
 
   return (
     <div style={{
-      flexShrink: 0,
-      borderBottom: "1px solid #1a1a1a",
-      background: "#090909",
-      padding: "8px 13px",
-      display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap",
+      flex: 1, background: SURF, border: `1px solid ${BORDER}`,
+      borderLeft: `3px solid ${BLUE}`, borderRadius: 4,
+      padding: "16px 16px", display: "flex", flexDirection: "column", gap: 12, overflow: "auto",
     }}>
-      {/* Label */}
-      <span style={{ fontFamily: mono, fontSize: 8, color: "#2a2a2a", letterSpacing: "0.10em" }}>
-        AUTO-EXEC
+      {/* Header row */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+        <span style={{ fontFamily: mono, fontSize: 8, fontWeight: 700, color: BLUE, letterSpacing: "0.12em" }}>
+          STRATEGY D
+        </span>
+        <DirectionBadge dir={signal.direction} />
+        <span style={{
+          fontFamily: mono, fontSize: 8, fontWeight: 700,
+          padding: "2px 7px", borderRadius: 2,
+          background: `${priorityCol}18`, border: `1px solid ${priorityCol}33`,
+          color: priorityCol,
+        }}>
+          {signal.priority}
+        </span>
+        <div style={{ flex: 1 }} />
+        <span style={{ fontFamily: mono, fontSize: 8, color: "#555" }}>
+          {timeAgo(signal.updated_at)}
+        </span>
+      </div>
+
+      {/* Big score + phase */}
+      <div style={{ display: "flex", alignItems: "center", gap: 16, flexShrink: 0 }}>
+        <div style={{ textAlign: "center" }}>
+          <div style={{ fontFamily: mono, fontSize: 48, fontWeight: 700, color: sc, lineHeight: 1 }}>
+            {signal.score}
+          </div>
+          <div style={{ fontFamily: mono, fontSize: 8, color: SUB, marginTop: 2 }}>/ 100</div>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <div style={{ fontFamily: mono, fontSize: 9, color: SUB }}>
+            Phase <span style={{ color: TEXT, fontWeight: 700 }}>{signal.phase}</span>/3
+          </div>
+          {ibEquity != null && (
+            <div style={{ fontFamily: mono, fontSize: 9, color: SUB }}>
+              Equity <span style={{ color: TEXT, fontWeight: 700 }}>${ibEquity.toLocaleString("en-US", { maximumFractionDigits: 0 })}</span>
+            </div>
+          )}
+          {signal.lot_size != null && (
+            <div style={{ fontFamily: mono, fontSize: 9, color: SUB }}>
+              Lots <span style={{ color: AMBER, fontWeight: 700 }}>{signal.lot_size.toFixed(2)}</span>
+            </div>
+          )}
+        </div>
+        {/* Score bar */}
+        <div style={{ flex: 1, height: 8, background: "#141414", borderRadius: 4, overflow: "hidden" }}>
+          <div style={{
+            width: `${signal.score}%`, height: "100%", borderRadius: 4,
+            background: sc, transition: "width 0.5s",
+          }} />
+        </div>
+      </div>
+
+      {/* Condition bars */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 5, flexShrink: 0 }}>
+        <div style={{ fontFamily: mono, fontSize: 7, color: "#555", letterSpacing: "0.10em", marginBottom: 2 }}>
+          CONDITIONS — {totalPoints}/{totalPossible} pts
+        </div>
+        {signal.conditions.map((c, i) => <CondBar key={i} bar={c} />)}
+      </div>
+
+      {/* Large price display */}
+      <div style={{
+        display: "grid", gridTemplateColumns: "repeat(3, 1fr)",
+        gap: 8, borderTop: `1px solid ${BORDER}`, paddingTop: 10, flexShrink: 0,
+      }}>
+        <div style={{
+          padding: "8px 10px", background: BG, borderRadius: 3, border: `1px solid ${BORDER}`,
+        }}>
+          <div style={{ fontFamily: mono, fontSize: 7, color: "#555", marginBottom: 3, letterSpacing: "0.08em" }}>ENTRY</div>
+          <div style={{ fontFamily: mono, fontSize: 13, fontWeight: 700, color: TEXT }}>{fmtPx(signal.entry)}</div>
+        </div>
+        <div style={{
+          padding: "8px 10px", background: BG, borderRadius: 3, border: `1px solid ${RED2}22`,
+        }}>
+          <div style={{ fontFamily: mono, fontSize: 7, color: "#555", marginBottom: 3, letterSpacing: "0.08em" }}>SL</div>
+          <div style={{ fontFamily: mono, fontSize: 13, fontWeight: 700, color: RED }}>{fmtPx(signal.sl)}</div>
+        </div>
+        <div style={{
+          padding: "8px 10px", background: BG, borderRadius: 3, border: `1px solid ${GREEN2}22`,
+        }}>
+          <div style={{ fontFamily: mono, fontSize: 7, color: "#555", marginBottom: 3, letterSpacing: "0.08em" }}>TP1</div>
+          <div style={{ fontFamily: mono, fontSize: 13, fontWeight: 700, color: GREEN }}>{fmtPx(signal.tp1)}</div>
+        </div>
+        {signal.tp2 != null && (
+          <div style={{
+            padding: "8px 10px", background: BG, borderRadius: 3, border: `1px solid ${GREEN2}18`,
+          }}>
+            <div style={{ fontFamily: mono, fontSize: 7, color: "#555", marginBottom: 3, letterSpacing: "0.08em" }}>TP2</div>
+            <div style={{ fontFamily: mono, fontSize: 12, fontWeight: 700, color: GREEN2 }}>{fmtPx(signal.tp2)}</div>
+          </div>
+        )}
+        {signal.tp3 != null && (
+          <div style={{
+            padding: "8px 10px", background: BG, borderRadius: 3, border: `1px solid ${GREEN2}12`,
+          }}>
+            <div style={{ fontFamily: mono, fontSize: 7, color: "#555", marginBottom: 3, letterSpacing: "0.08em" }}>TP3</div>
+            <div style={{ fontFamily: mono, fontSize: 12, fontWeight: 700, color: GREEN2 }}>{fmtPx(signal.tp3)}</div>
+          </div>
+        )}
+      </div>
+
+      {/* Execute button */}
+      {canExecute && signal.signal_id && (
+        <div style={{ flexShrink: 0 }}>
+          {execMsg && (
+            <div style={{
+              fontFamily: mono, fontSize: 9,
+              color: execMsg.startsWith("✓") ? GREEN : RED,
+              background: execMsg.startsWith("✓") ? "rgba(78,207,138,0.07)" : "rgba(207,78,78,0.07)",
+              border: `1px solid ${execMsg.startsWith("✓") ? "rgba(78,207,138,0.2)" : "rgba(207,78,78,0.2)"}`,
+              borderRadius: 3, padding: "6px 9px", marginBottom: 6,
+            }}>
+              {execMsg}
+            </div>
+          )}
+          <button
+            onClick={() => signal.signal_id && onExecute(signal.signal_id)}
+            disabled={executing}
+            style={{
+              width: "100%", fontFamily: mono, fontSize: 10, fontWeight: 700,
+              padding: "9px 0", borderRadius: 3, cursor: executing ? "not-allowed" : "pointer",
+              background: executing
+                ? "#0a0a0a"
+                : signal.direction === "LONG"
+                  ? "rgba(78,207,138,0.10)"
+                  : "rgba(207,78,78,0.10)",
+              border: `1px solid ${executing ? BORDER : dirCol + "44"}`,
+              color: executing ? DIM : dirCol,
+              letterSpacing: "0.06em",
+              opacity: executing ? 0.6 : 1,
+              transition: "all 0.15s",
+            }}
+          >
+            {executing ? "PLACING…" : `▶ EXECUTE ${signal.direction} ON HL`}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Session news feed ─────────────────────────────────────────────────────────
+
+function NewsFeed({ events }: { events: NewsEvent[] }) {
+  if (events.length === 0) {
+    return (
+      <div style={{
+        background: SURF, border: `1px solid ${BORDER}`, borderRadius: 4,
+        padding: "10px 12px",
+      }}>
+        <div style={{ fontFamily: mono, fontSize: 7, color: "#555", letterSpacing: "0.10em", marginBottom: 6 }}>
+          NEWS
+        </div>
+        <span style={{ fontFamily: mono, fontSize: 8, color: "#555" }}>No events in next 2h</span>
+      </div>
+    );
+  }
+
+  const impactColor = (i: string) =>
+    i === "HIGH" ? RED : i === "MEDIUM" ? AMBER : SUB;
+
+  return (
+    <div style={{
+      background: SURF, border: `1px solid ${BORDER}`, borderRadius: 4,
+      padding: "10px 12px", display: "flex", flexDirection: "column", gap: 5,
+    }}>
+      <div style={{ fontFamily: mono, fontSize: 7, color: "#555", letterSpacing: "0.10em", marginBottom: 2 }}>
+        UPCOMING NEWS
+      </div>
+      {events.slice(0, 6).map((ev, i) => (
+        <div key={i} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{
+            fontFamily: mono, fontSize: 7, fontWeight: 700,
+            color: impactColor(ev.impact), flexShrink: 0,
+            padding: "1px 4px", borderRadius: 2,
+            background: `${impactColor(ev.impact)}14`,
+            border: `1px solid ${impactColor(ev.impact)}22`,
+          }}>
+            {ev.impact.charAt(0)}
+          </span>
+          <span style={{ fontFamily: sans, fontSize: 9, color: SUB, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {ev.title}
+          </span>
+          <span style={{ fontFamily: mono, fontSize: 8, color: "#555", flexShrink: 0 }}>
+            {ev.mins_until < 60
+              ? `${ev.mins_until}m`
+              : `${Math.floor(ev.mins_until / 60)}h${ev.mins_until % 60 > 0 ? `${ev.mins_until % 60}m` : ""}`}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── IB tracker widget ─────────────────────────────────────────────────────────
+
+function IBTracker({ summary }: { summary: IBSummary | null }) {
+  return (
+    <div style={{
+      background: SURF, border: `1px solid ${BORDER}`, borderRadius: 4,
+      padding: "10px 12px",
+    }}>
+      <div style={{ fontFamily: mono, fontSize: 7, color: "#555", letterSpacing: "0.10em", marginBottom: 8 }}>
+        IB REBATE TRACKER
+      </div>
+      {summary ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <div style={{ display: "flex", justifyContent: "space-between" }}>
+            <span style={{ fontFamily: mono, fontSize: 8, color: SUB }}>Today</span>
+            <span style={{ fontFamily: mono, fontSize: 9, color: TEXT, fontWeight: 700 }}>
+              {summary.today_lots.toFixed(2)} lots
+              <span style={{ color: GREEN, marginLeft: 6 }}>
+                +${summary.today_rebate_usd.toFixed(2)}
+              </span>
+            </span>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between" }}>
+            <span style={{ fontFamily: mono, fontSize: 8, color: SUB }}>Month</span>
+            <span style={{ fontFamily: mono, fontSize: 9, color: TEXT, fontWeight: 700 }}>
+              {summary.monthly_lots.toFixed(2)} lots
+              <span style={{ color: GREEN, marginLeft: 6 }}>
+                +${summary.monthly_rebate_usd.toFixed(2)}
+              </span>
+            </span>
+          </div>
+          <div style={{ fontFamily: mono, fontSize: 7, color: "#555", marginTop: 2 }}>
+            @ $3.00/std lot
+          </div>
+        </div>
+      ) : (
+        <span style={{ fontFamily: mono, fontSize: 8, color: "#555" }}>Loading…</span>
+      )}
+    </div>
+  );
+}
+
+// ── Session status bar ────────────────────────────────────────────────────────
+
+function SessionBar({ status }: { status: SessionStatus | null }) {
+  const [tick, setTick] = useState(0);
+
+  useEffect(() => {
+    const id = setInterval(() => setTick(t => t + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  if (!status) {
+    return (
+      <div style={{
+        height: 36, flexShrink: 0,
+        background: "#090909", borderBottom: `1px solid ${BORDER}`,
+        display: "flex", alignItems: "center", padding: "0 14px",
+      }}>
+        <span style={{ fontFamily: mono, fontSize: 8, color: "#555" }}>Loading session…</span>
+      </div>
+    );
+  }
+
+  const col = sessionColor(status.session);
+  const isPrimary = status.is_primary_window;
+  const nyOpenSecs = status.ny_open_secs - tick;
+  const nyCloseSecs = status.ny_close_secs - tick;
+
+  // NY open/close countdown
+  let timeLabel: string;
+  if (nyOpenSecs > 0) {
+    timeLabel = `NY open in ${fmtSecs(nyOpenSecs)}`;
+  } else if (nyCloseSecs > 0) {
+    timeLabel = `NY close in ${fmtSecs(nyCloseSecs)}`;
+  } else {
+    timeLabel = "NY closed";
+  }
+
+  // News in next 2h inline
+  const nearNews = (status.news_events ?? [])
+    .filter(e => e.mins_until >= 0 && e.mins_until <= 120 && e.impact === "HIGH")
+    .slice(0, 3);
+
+  return (
+    <div style={{
+      height: 36, flexShrink: 0,
+      background: "#090909", borderBottom: `1px solid ${BORDER}`,
+      display: "flex", alignItems: "center", padding: "0 14px", gap: 12,
+    }}>
+      {/* Session name + pulse */}
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        {isPrimary && (
+          <span style={{
+            display: "inline-block", width: 6, height: 6, borderRadius: "50%",
+            background: AMBER,
+            animation: "pulse 1.4s infinite",
+          }} />
+        )}
+        <span style={{
+          fontFamily: mono, fontSize: 9, fontWeight: 700,
+          color: col, letterSpacing: "0.08em",
+          background: `${col}12`, border: `1px solid ${col}2a`,
+          borderRadius: 3, padding: "2px 8px",
+        }}>
+          {status.session.replace("_", " ")}
+        </span>
+      </div>
+
+      <div style={{ width: 1, height: 16, background: BORDER }} />
+
+      {/* NY countdown */}
+      <span style={{ fontFamily: mono, fontSize: 8, color: SUB }}>
+        {timeLabel}
       </span>
 
-      {/* Mode indicator */}
-      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-        <div style={{
-          width: 6, height: 6, borderRadius: "50%",
-          background: mode === "stopped" ? "#2a2a2a" : col,
-          boxShadow: mode !== "stopped" ? `0 0 5px ${col}` : "none",
-        }} />
-        <span style={{ fontFamily: mono, fontSize: 9, fontWeight: 700, color: col }}>
-          {mode.toUpperCase()}
-        </span>
-      </div>
+      <div style={{ width: 1, height: 16, background: BORDER }} />
 
-      {/* Mode buttons */}
-      <div style={{ display: "flex", gap: 2 }}>
-        {(["stopped", "paper", "live"] as ExecMode[]).map(m => {
-          const disabled = m === "live" && (!hlOk || halted);
-          const active   = mode === m;
-          const mc       = modeColor[m];
-          return (
-            <button
-              key={m}
-              onClick={() => !disabled && !setting && onSetMode(m)}
-              disabled={disabled || setting}
-              title={
-                m === "live" && !hlOk ? "HL_PRIVATE_KEY not configured" :
-                m === "live" && halted ? "Kill-switch active — restart bridge" : undefined
-              }
-              style={{
-                fontFamily: mono, fontSize: 8, padding: "3px 8px", borderRadius: 2,
-                cursor: disabled ? "not-allowed" : "pointer",
-                background: active ? `${mc}18` : "#0a0a0a",
-                border: `1px solid ${active ? `${mc}44` : "#1c1c1c"}`,
-                color: active ? mc : disabled ? "#222" : "#444",
-                opacity: setting ? 0.6 : 1,
-              }}
-            >
-              {m === "stopped" ? "■ STOP" : m === "paper" ? "◎ PAPER" : "▶ LIVE"}
-            </button>
-          );
-        })}
-      </div>
+      {/* UTC time */}
+      <span style={{ fontFamily: mono, fontSize: 8, color: DIM }}>
+        {status.time_utc}
+      </span>
 
-      {/* Broker selector */}
-      <div style={{ display: "flex", gap: 2 }}>
-        {(["hl", "mt5", "both"] as ExecBroker[]).map(b => {
-          const labels: Record<ExecBroker, string> = { hl: "HL", mt5: "MT5", both: "BOTH" };
-          const colors: Record<ExecBroker, string> = { hl: BLUE, mt5: AMBER, both: GREEN };
-          const bc = colors[b];
-          const active = broker === b;
-          const disabled = (b === "mt5" || b === "both") && !mt5Ok;
-          return (
-            <button
-              key={b}
-              onClick={() => !disabled && !setting && onSetBroker(b)}
-              disabled={disabled || setting}
-              title={disabled ? "MT5 not connected" : undefined}
-              style={{
-                fontFamily: mono, fontSize: 8, padding: "3px 7px", borderRadius: 2,
-                cursor: disabled ? "not-allowed" : "pointer",
-                background: active ? `${bc}18` : "#0a0a0a",
-                border: `1px solid ${active ? `${bc}44` : "#1c1c1c"}`,
-                color: active ? bc : disabled ? "#222" : "#333",
-              }}
-            >{labels[b]}</button>
-          );
-        })}
-      </div>
-
-      <div style={{ width: 1, height: 16, background: "#1c1c1c" }} />
-
-      {/* Next scan countdown */}
-      {mode !== "stopped" && (
-        <span style={{ fontFamily: mono, fontSize: 8, color: "#444" }}>
-          Next scan: {minsLeft()}
-        </span>
-      )}
-
-      {/* Paper equity */}
-      {(mode === "paper" || (status?.paper.equity ?? 10000) !== 10000) && (
-        <span style={{
-          fontFamily: mono, fontSize: 8,
-          color: paperPnl >= 0 ? GREEN : RED,
+      {/* Inline high-impact news */}
+      {nearNews.map((ev, i) => (
+        <span key={i} style={{
+          fontFamily: mono, fontSize: 7,
+          color: RED, background: "rgba(207,78,78,0.08)",
+          border: "1px solid rgba(207,78,78,0.2)",
+          borderRadius: 2, padding: "1px 6px",
         }}>
-          Paper: ${paperEq.toFixed(0)} ({paperPnl >= 0 ? "+" : ""}${paperPnl.toFixed(0)})
-        </span>
-      )}
-
-      {/* Open paper positions */}
-      {Object.entries(positions).map(([coin, pos]) => (
-        <span key={coin} style={{
-          fontFamily: mono, fontSize: 8, padding: "1px 6px", borderRadius: 2,
-          background: pos.direction === "LONG" ? "rgba(78,207,138,0.08)" : "rgba(207,78,78,0.08)",
-          border: `1px solid ${pos.direction === "LONG" ? "rgba(78,207,138,0.2)" : "rgba(207,78,78,0.2)"}`,
-          color: pos.direction === "LONG" ? GREEN : RED,
-        }}>
-          {pos.direction === "LONG" ? "↑" : "↓"} {coin} @{fmtPx(pos.entry)}
+          ⚡ {ev.title.slice(0, 28)} in {ev.mins_until}m
         </span>
       ))}
 
-      {/* Last execution */}
-      {lastExec && (
-        <>
-          <div style={{ width: 1, height: 16, background: "#1c1c1c" }} />
-          <span style={{ fontFamily: mono, fontSize: 8, color: "#333" }}>
-            Last: {new Date(lastExec.ts * 1000).toLocaleTimeString()} ·{" "}
-            <span style={{ color: lastExec.ok ? GREEN : RED }}>
-              {lastExec.ok ? "" : "✕ "}{lastExec.direction} {lastExec.coin}
-            </span>
-            {lastExec.error && (
-              <span style={{ color: RED }}> — {lastExec.error}</span>
-            )}
-          </span>
-        </>
-      )}
-
-      {/* Kill-switch warning */}
-      {halted && (
-        <span style={{
-          fontFamily: mono, fontSize: 8, color: RED,
-          background: "rgba(207,78,78,0.1)", border: "1px solid rgba(207,78,78,0.25)",
-          borderRadius: 2, padding: "2px 7px",
-        }}>
-          ⚠ KILL-SWITCH ACTIVE
-        </span>
-      )}
+      <style>{`
+        @keyframes pulse {
+          0%, 100% { opacity: 1; box-shadow: 0 0 0 0 ${AMBER}88; }
+          50% { opacity: 0.6; box-shadow: 0 0 0 4px ${AMBER}00; }
+        }
+      `}</style>
     </div>
   );
 }
 
 // ── Main Page ─────────────────────────────────────────────────────────────────
 
+const ASSETS = ["XAUUSD", "BTC", "ETH", "SOL"] as const;
+type AssetKey = typeof ASSETS[number];
+
 export default function StrategiesPage() {
-  const [regime,     setRegime]     = useState<Record<Coin, RegimeCoin> | null>(null);
-  const [autoExec,   setAutoExec]   = useState<AutoExecStatus | null>(null);
-  const [settingMode, setSettingMode] = useState(false);
-  const [scanCoin,   setScanCoin]   = useState<Coin>("BTC");
-  const [scanIv,     setScanIv]     = useState<Interval>("1h");
-  const [scanning,   setScanning]   = useState(false);
-  const [scanResult, setScanResult] = useState<ScanResult | null>(null);
-  const [scanError,  setScanError]  = useState<string | null>(null);
-  const [lastScan,   setLastScan]   = useState<string | null>(null);
-  const [showConfirm, setShowConfirm] = useState<ConfirmState | null>(null);
-  const [modalExec,   setModalExec]  = useState(false);
-  const [modalMsg,    setModalMsg]   = useState<string | null>(null);
-  const [cardExec,    setCardExec]   = useState<Record<string, boolean>>({});
+  const [liveAll,    setLiveAll]    = useState<SignalLiveResponse[]>([]);
+  const [selAsset,   setSelAsset]   = useState<AssetKey>("XAUUSD");
+  const liveData = liveAll.find(d => d.asset === selAsset) ?? null;
+  const [sessionSt,  setSessionSt]  = useState<SessionStatus | null>(null);
+  const [ibSummary,  setIBSummary]  = useState<IBSummary | null>(null);
+  const [executing,  setExecuting]  = useState(false);
+  const [execMsg,    setExecMsg]    = useState<string | null>(null);
 
-  const fetchRegime = useCallback(async () => {
+  // Polling refs to avoid stale closures
+  const aliveRef = useRef(true);
+
+  const fetchLive = useCallback(async () => {
     try {
-      const r = await fetch(`${BRIDGE_HTTP}/regime`);
-      if (r.ok) setRegime(await r.json());
+      const r = await fetch(`${BRIDGE_HTTP}/signals/live`);
+      if (r.ok && aliveRef.current) {
+        const data = await r.json();
+        setLiveAll(Array.isArray(data) ? data : [data]);
+      }
     } catch { /* offline */ }
   }, []);
 
-  const fetchAutoExec = useCallback(async () => {
+  const fetchSession = useCallback(async () => {
     try {
-      const r = await fetch(`${BRIDGE_HTTP}/auto-exec/status`);
-      if (r.ok) setAutoExec(await r.json());
+      const r = await fetch(`${BRIDGE_HTTP}/session/status`);
+      if (r.ok && aliveRef.current) setSessionSt(await r.json() as SessionStatus);
     } catch { /* offline */ }
   }, []);
 
-  async function setMode(mode: ExecMode) {
-    setSettingMode(true);
+  const fetchIB = useCallback(async () => {
     try {
-      const r = await fetch(`${BRIDGE_HTTP}/auto-exec/mode`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode }),
-      });
-      const d = await r.json();
-      if (d.ok) await fetchAutoExec();
-      else setModalMsg(`✕ ${d.error ?? "Failed to set mode"}`);
-    } catch {
-      setModalMsg("✕ Bridge offline");
-    } finally {
-      setSettingMode(false);
-    }
-  }
-
-  async function setBroker(broker: ExecBroker) {
-    setSettingMode(true);
-    try {
-      const r = await fetch(`${BRIDGE_HTTP}/auto-exec/broker`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ broker }),
-      });
-      const d = await r.json();
-      if (d.ok) await fetchAutoExec();
-      else setModalMsg(`✕ ${d.error ?? "Failed to set broker"}`);
-    } catch {
-      setModalMsg("✕ Bridge offline");
-    } finally {
-      setSettingMode(false);
-    }
-  }
+      const r = await fetch(`${BRIDGE_HTTP}/ib/summary`);
+      if (r.ok && aliveRef.current) setIBSummary(await r.json() as IBSummary);
+    } catch { /* offline */ }
+  }, []);
 
   useEffect(() => {
-    fetchRegime();
-    fetchAutoExec();
-    const id1 = setInterval(fetchRegime, 30_000);
-    const id2 = setInterval(fetchAutoExec, 10_000);
-    return () => { clearInterval(id1); clearInterval(id2); };
-  }, [fetchRegime, fetchAutoExec]);
+    aliveRef.current = true;
 
-  async function runScan() {
-    setScanning(true);
-    setScanError(null);
-    setScanResult(null);
+    fetchLive();
+    fetchSession();
+    fetchIB();
+
+    const id1 = setInterval(fetchLive,    15_000);
+    const id2 = setInterval(fetchSession,  5_000);
+    const id3 = setInterval(fetchIB,      60_000);
+
+    return () => {
+      aliveRef.current = false;
+      clearInterval(id1);
+      clearInterval(id2);
+      clearInterval(id3);
+    };
+  }, [fetchLive, fetchSession, fetchIB]);
+
+  async function handleExecute(signalId: string) {
+    setExecuting(true);
+    setExecMsg(null);
     try {
-      const r = await fetch(`${BRIDGE_HTTP}/strategies/scan`, {
+      const r = await fetch(`${BRIDGE_HTTP}/trade/confirm/${signalId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ coin: scanCoin, interval: scanIv }),
-      });
-      if (!r.ok) { setScanError(`Scan failed (HTTP ${r.status})`); return; }
-      const d = await r.json();
-      if (d.error) { setScanError(d.error); return; }
-      setScanResult(d as ScanResult);
-      setLastScan(new Date().toLocaleTimeString());
-    } catch {
-      setScanError("Bridge offline");
-    } finally {
-      setScanning(false);
-    }
-  }
-
-  function openConfirm(strat: string, result: StratResult) {
-    const direction = result.direction === "long" ? "LONG" : "SHORT";
-    setModalMsg(null);
-    setShowConfirm({
-      strat,
-      direction,
-      entry: result.entry ?? 0,
-      sl:    result.sl    ?? 0,
-      tp:    result.tp1   ?? 0,
-      coin:  scanCoin,
-    });
-  }
-
-  function openConfirmFromConsensus(consensus: Consensus) {
-    setModalMsg(null);
-    setShowConfirm({
-      strat:     consensus.bestStrat,
-      direction: consensus.direction,
-      entry:     consensus.bestEntry,
-      sl:        consensus.bestSL,
-      tp:        consensus.bestTP,
-      coin:      scanCoin,
-    });
-  }
-
-  async function placeOrder() {
-    if (!showConfirm) return;
-    setModalExec(true);
-    setModalMsg(null);
-    try {
-      const c = showConfirm;
-      const r = await fetch(`${BRIDGE_HTTP}/trade/hl/open`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          coin:              c.coin,
-          is_buy:            c.direction === "LONG",
-          size_usd:          50,
-          leverage:          5,
-          post_only:         true,
-          max_drawdown_pct:  0.15,
-          max_position_pct:  0.20,
-        }),
       });
       const d = await r.json();
       if (d.ok) {
-        setModalMsg(`✓ ${c.direction} ${c.coin} placed`);
-        setTimeout(() => setShowConfirm(null), 1800);
+        setExecMsg(`✓ Order placed — ${signalId}`);
+        setTimeout(() => setExecMsg(null), 4000);
       } else {
-        setModalMsg(`✕ ${d.error ?? "Failed"}`);
+        setExecMsg(`✕ ${d.error ?? "Failed to execute"}`);
       }
     } catch {
-      setModalMsg("✕ Bridge offline");
+      setExecMsg("✕ Bridge offline");
     } finally {
-      setModalExec(false);
+      setExecuting(false);
     }
   }
 
-  const consensus = getConsensus(scanResult);
-  const coins: Coin[]         = ["BTC", "ETH", "SOL", "PAXG"];
-  const intervals: Interval[] = ["1h", "4h"];
+  const ibEquity = ibSummary
+    ? undefined  // IBSummary doesn't carry equity; fetched from /ib/summary separately
+    : null;
+
+  // Extract equity from signal_d phase context if available
+  const equity: number | null = null;
 
   return (
-    <div style={{ height: "100%", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+    <div style={{
+      height: "100%", display: "flex", flexDirection: "column",
+      overflowY: "auto", overflowX: "hidden", background: BG,
+      WebkitOverflowScrolling: "touch",
+      paddingBottom: "calc(var(--bottom-nav-h, 56px) + env(safe-area-inset-bottom, 0px))",
+    }}>
+      {/* Session status bar */}
+      <SessionBar status={sessionSt} />
 
-      {/* Regime strip */}
-      <RegimeStrip regime={regime} />
+      {/* Conditions warning bar */}
+      <ConditionsBar liveAll={liveAll} sessionSt={sessionSt} />
 
-      {/* Auto-exec control */}
-      <AutoExecPanel
-        status={autoExec}
-        onSetMode={setMode}
-        onSetBroker={setBroker}
-        setting={settingMode}
-      />
+      {/* All-assets summary grid — always visible */}
+      <AllAssetsGrid liveAll={liveAll} selected={selAsset} onSelect={(a) => setSelAsset(a as AssetKey)} />
 
-      {/* Two-panel body */}
-      <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
+      {/* 3-column body */}
+      <div style={{ flex: 1, display: "grid", gridTemplateColumns: "220px 1fr 220px", gap: 0, overflow: "hidden" }}>
 
-        {/* ── Left: Strategy Scanner (55%) ── */}
+        {/* ── LEFT column: Strategy A + Strategy B ── */}
         <div style={{
-          width: "55%", flexShrink: 0,
-          display: "flex", flexDirection: "column", overflow: "hidden",
-          borderRight: "1px solid #1a1a1a",
+          borderRight: `1px solid ${BORDER}`,
+          display: "flex", flexDirection: "column", gap: 6,
+          padding: "10px 10px", overflow: "auto",
         }}>
-          {/* Scanner header */}
           <div style={{
-            padding: "8px 13px",
-            borderBottom: "1px solid #1a1a1a",
-            display: "flex", alignItems: "center", gap: 8, flexShrink: 0,
-            background: "#0a0a0a",
+            fontFamily: mono, fontSize: 7, color: "#555",
+            letterSpacing: "0.12em", marginBottom: 2, flexShrink: 0,
           }}>
-            <span style={{ fontFamily: mono, fontSize: 8, color: "#2a2a2a", letterSpacing: "0.10em" }}>
-              STRATEGY SCANNER
-            </span>
-
-            {/* Coin selector */}
-            <div style={{ display: "flex", gap: 2, marginLeft: 6 }}>
-              {coins.map(c => (
-                <button key={c} onClick={() => setScanCoin(c)} style={{
-                  fontFamily: mono, fontSize: 9, padding: "3px 8px", borderRadius: 2, cursor: "pointer",
-                  background: scanCoin === c ? "#101e30" : "#0a0a0a",
-                  border: `1px solid ${scanCoin === c ? "#1c3050" : "#1c1c1c"}`,
-                  color: scanCoin === c ? BLUE : "#444",
-                }}>{c}</button>
-              ))}
-            </div>
-
-            <div style={{ width: 1, height: 16, background: "#1c1c1c" }} />
-
-            {/* Interval selector */}
-            <div style={{ display: "flex", gap: 2 }}>
-              {intervals.map(iv => (
-                <button key={iv} onClick={() => setScanIv(iv)} style={{
-                  fontFamily: mono, fontSize: 9, padding: "3px 8px", borderRadius: 2, cursor: "pointer",
-                  background: scanIv === iv ? "#101e30" : "#0a0a0a",
-                  border: `1px solid ${scanIv === iv ? "#1c3050" : "#1c1c1c"}`,
-                  color: scanIv === iv ? BLUE : "#444",
-                }}>{iv}</button>
-              ))}
-            </div>
-
-            <button onClick={runScan} disabled={scanning} style={{
-              fontFamily: mono, fontSize: 9, fontWeight: 600,
-              padding: "4px 13px", borderRadius: 2, cursor: scanning ? "not-allowed" : "pointer",
-              background: scanning ? "#0f1a12" : "#101e30",
-              border: `1px solid ${scanning ? "#1c3a28" : "#1c3050"}`,
-              color: scanning ? GREEN : BLUE,
-              opacity: scanning ? 0.7 : 1,
-            }}>
-              {scanning ? "SCANNING…" : "▶ RUN SCAN"}
-            </button>
-
-            {scanResult && lastScan && (
-              <span style={{ fontFamily: mono, fontSize: 7, color: "#2a2a2a" }}>
-                {scanResult.candles?.toLocaleString()} candles · {lastScan}
-              </span>
-            )}
-
-            {/* Strategy B note when 1h selected */}
-            {scanIv === "1h" && (
-              <span style={{ fontFamily: mono, fontSize: 7, color: "#333", marginLeft: "auto" }}>
-                B: 4h loaded automatically
-              </span>
-            )}
+            RANGE / TREND
           </div>
+          <AbcCard
+            label="A"
+            color={AMBER}
+            signal={liveData?.signal_a ?? null}
+          />
+          <AbcCard
+            label="B"
+            color={GREEN}
+            signal={liveData?.signal_b ?? null}
+          />
 
-          {/* Error */}
-          {scanError && (
+          {/* Asset + regime context */}
+          {liveData && (
             <div style={{
-              fontFamily: mono, fontSize: 9, color: RED,
-              padding: "7px 13px", background: "rgba(207,78,78,0.07)",
-              borderBottom: "1px solid rgba(207,78,78,0.15)", flexShrink: 0,
+              marginTop: 6, padding: "8px 10px",
+              background: SURF, border: `1px solid ${BORDER}`,
+              borderRadius: 4, display: "flex", flexDirection: "column", gap: 4,
             }}>
-              {scanError}
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span style={{ fontFamily: mono, fontSize: 8, color: SUB }}>Asset</span>
+                <span style={{ fontFamily: mono, fontSize: 9, fontWeight: 700, color: TEXT }}>
+                  {liveData.asset}
+                </span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span style={{ fontFamily: mono, fontSize: 8, color: SUB }}>Price</span>
+                <span style={{ fontFamily: mono, fontSize: 9, fontWeight: 700, color: TEXT }}>
+                  {fmtPx(liveData.price)}
+                </span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span style={{ fontFamily: mono, fontSize: 8, color: SUB }}>Regime</span>
+                <span style={{ fontFamily: mono, fontSize: 8, fontWeight: 700, color: AMBER }}>
+                  {liveData.regime}
+                </span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span style={{ fontFamily: mono, fontSize: 8, color: SUB }}>Bias</span>
+                <span style={{
+                  fontFamily: mono, fontSize: 8, fontWeight: 700,
+                  color: liveData.bias === "LONG" ? GREEN : liveData.bias === "SHORT" ? RED : SUB,
+                }}>
+                  {liveData.bias}
+                </span>
+              </div>
+              {liveData.news_flag && (
+                <div style={{
+                  fontFamily: mono, fontSize: 7,
+                  color: RED, background: "rgba(207,78,78,0.08)",
+                  border: "1px solid rgba(207,78,78,0.2)",
+                  borderRadius: 2, padding: "2px 6px", textAlign: "center", marginTop: 2,
+                }}>
+                  ⚡ NEWS ACTIVE
+                </div>
+              )}
+              {liveData.blackout_active && (
+                <div style={{
+                  fontFamily: mono, fontSize: 7,
+                  color: AMBER, background: "rgba(207,173,78,0.08)",
+                  border: "1px solid rgba(207,173,78,0.2)",
+                  borderRadius: 2, padding: "2px 6px", textAlign: "center",
+                }}>
+                  ■ BLACKOUT
+                </div>
+              )}
             </div>
           )}
-
-          {/* Results scroll area */}
-          <div style={{ flex: 1, overflowY: "auto", padding: "10px 12px", display: "flex", flexDirection: "column", gap: 6 }}>
-            {/* Consensus banner */}
-            {consensus && (
-              <ConsensusBanner
-                consensus={consensus}
-                coin={scanCoin}
-                onExecute={openConfirmFromConsensus}
-              />
-            )}
-
-            {/* Strategy cards */}
-            {(["A","B","C","D"] as StratKey[]).map(s => (
-              <StrategyCard
-                key={s}
-                strat={s}
-                result={scanResult?.[s] ?? null}
-                coin={scanCoin}
-                onExecute={openConfirm}
-                executing={cardExec[s] ?? false}
-              />
-            ))}
-
-            {/* Empty state */}
-            {!scanResult && !scanning && !scanError && (
-              <div style={{
-                flex: 1, display: "flex", flexDirection: "column",
-                alignItems: "center", justifyContent: "center",
-                gap: 6, paddingTop: 60,
-              }}>
-                <div style={{ fontFamily: mono, fontSize: 9, color: "#1e1e1e", letterSpacing: "0.10em" }}>
-                  SELECT COIN + INTERVAL AND PRESS ▶ RUN SCAN
-                </div>
-              </div>
-            )}
-
-            {/* Execution log */}
-            {(autoExec?.log?.length ?? 0) > 0 && (
-              <div style={{ marginTop: 10 }}>
-                <div style={{
-                  fontFamily: mono, fontSize: 8, color: "#2a2a2a",
-                  letterSpacing: "0.10em", marginBottom: 6,
-                }}>
-                  EXECUTION LOG
-                </div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
-                  {autoExec!.log.slice(0, 10).map((entry, i) => (
-                    <div key={i} style={{
-                      display: "flex", alignItems: "center", gap: 7,
-                      height: 28, padding: "0 8px",
-                      background: i % 2 === 0 ? "#090909" : "transparent",
-                      borderRadius: 2,
-                      fontSize: 9, fontFamily: mono,
-                    }}>
-                      {/* Timestamp */}
-                      <span style={{ color: "#333", flexShrink: 0, width: 62 }}>
-                        {new Date(entry.ts * 1000).toLocaleTimeString()}
-                      </span>
-                      {/* Coin */}
-                      <span style={{ color: "#666", flexShrink: 0, width: 32 }}>{entry.coin}</span>
-                      {/* Direction */}
-                      <span style={{
-                        color: entry.direction === "LONG" ? GREEN : RED,
-                        flexShrink: 0, width: 12,
-                      }}>
-                        {entry.direction === "LONG" ? "↑" : "↓"}
-                      </span>
-                      {/* Strategies */}
-                      <span style={{ color: "#555", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {entry.strategies.join("+")}
-                      </span>
-                      {/* Mode chip */}
-                      <span style={{
-                        flexShrink: 0,
-                        fontFamily: mono, fontSize: 7, padding: "0px 4px", borderRadius: 2,
-                        background: entry.mode === "live" ? "rgba(78,207,138,0.08)" : "rgba(207,173,78,0.08)",
-                        border: `1px solid ${entry.mode === "live" ? "rgba(78,207,138,0.2)" : "rgba(207,173,78,0.2)"}`,
-                        color: entry.mode === "live" ? GREEN : AMBER,
-                      }}>
-                        {entry.mode === "live" ? "LIVE" : "PAPER"}
-                      </span>
-                      {/* Result */}
-                      <span style={{
-                        flexShrink: 0,
-                        color: entry.ok ? GREEN : RED,
-                        width: entry.ok ? 10 : undefined,
-                        maxWidth: 160,
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                      }}>
-                        {entry.ok ? "✓" : `✕ ${(entry.error ?? "").slice(0, 40)}`}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
         </div>
 
-        {/* ── Right: AI Signal Feed (45%) ── */}
-        <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-          <AISignalPanel
-            consensusCoin={consensus ? scanCoin : undefined}
-            consensusDir={consensus?.direction}
+        {/* ── CENTRE column: Strategy D ── */}
+        <div style={{
+          borderRight: `1px solid ${BORDER}`,
+          display: "flex", flexDirection: "column",
+          padding: "10px 12px", overflow: "hidden",
+        }}>
+          <div style={{
+            fontFamily: mono, fontSize: 7, color: "#555",
+            letterSpacing: "0.12em", marginBottom: 8, flexShrink: 0,
+          }}>
+            SIGNAL COMMAND — UNIFIED (D)
+          </div>
+          <StratDPanel
+            signal={liveData?.signal_d ?? null}
+            ibEquity={equity}
+            onExecute={handleExecute}
+            executing={executing}
+            execMsg={execMsg}
           />
         </div>
-      </div>
 
-      {/* Confirm modal */}
-      {showConfirm && (
-        <ConfirmModal
-          confirm={showConfirm}
-          executing={modalExec}
-          execMsg={modalMsg}
-          onConfirm={placeOrder}
-          onCancel={() => { setShowConfirm(null); setModalMsg(null); }}
-        />
-      )}
+        {/* ── RIGHT column: Strategy C + News + IB ── */}
+        <div style={{
+          display: "flex", flexDirection: "column", gap: 6,
+          padding: "10px 10px", overflow: "auto",
+        }}>
+          <div style={{
+            fontFamily: mono, fontSize: 7, color: "#555",
+            letterSpacing: "0.12em", marginBottom: 2, flexShrink: 0,
+          }}>
+            GOLD / SESSION / IB
+          </div>
+          <AbcCard
+            label="C"
+            color={AMBER}
+            signal={liveData?.signal_c ?? null}
+          />
+          <NewsFeed events={sessionSt?.news_events ?? []} />
+          <IBTracker summary={ibSummary} />
+        </div>
+      </div>
     </div>
   );
 }

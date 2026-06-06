@@ -12,31 +12,55 @@ function fmtPx(n: number) {
   return "$" + n.toLocaleString("en-US", { maximumFractionDigits: n > 100 ? 1 : 4 });
 }
 
+function CloseIcon() {
+  return (
+    <svg viewBox="0 0 12 12" width="10" height="10" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+      <line x1="2" y1="2" x2="10" y2="10"/>
+      <line x1="10" y1="2" x2="2" y2="10"/>
+    </svg>
+  );
+}
+
+interface PriceItemProps {
+  label: string;
+  value: string;
+  color?: string;
+}
+
+function PriceItem({ label, value, color }: PriceItemProps) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+      <span style={{ fontFamily: mono, fontSize: 7, color: "#555", letterSpacing: "0.08em", textTransform: "uppercase" }}>
+        {label}
+      </span>
+      <span style={{ fontFamily: sans, fontWeight: 600, fontSize: 11, color: color ?? "#e8e8e8", fontVariantNumeric: "tabular-nums" }}>
+        {value}
+      </span>
+    </div>
+  );
+}
+
 interface Props {
   signal: AISignal | null;
   onDismiss: () => void;
-  onNavigate: () => void;   // navigate to Signals page
+  onNavigate: () => void;
 }
 
 export default function SignalToast({ signal, onDismiss, onNavigate }: Props) {
-  const [visible, setVisible] = useState(false);
-  const [leaving, setLeaving] = useState(false);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const prevIdRef = useRef<number | null>(null);
+  const [visible, setVisible]   = useState(false);
+  const [leaving, setLeaving]   = useState(false);
+  const timerRef                = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const prevIdRef               = useRef<number | null>(null);
 
   useEffect(() => {
     if (!signal) return;
-    // Only animate in when a NEW signal arrives (different id)
     const id = signal.id ?? signal.created_at;
     if (id === prevIdRef.current) return;
     prevIdRef.current = id;
-
-    // Skip HOLD signals
     if (signal.signal === "HOLD") return;
 
-    // Request browser notification permission + show OS notification
     if (typeof Notification !== "undefined" && Notification.permission === "granted") {
-      new Notification(`MEGALPHA · ${signal.signal} SIGNAL`, {
+      new Notification(`CORTISOL · ${signal.signal} SIGNAL`, {
         body: `${signal.coin}/USDC ${signal.interval} · ${signal.confidence}% confidence\n${signal.reasoning?.slice(0, 100)}`,
         tag: `megalpha-signal-${id}`,
       });
@@ -46,127 +70,176 @@ export default function SignalToast({ signal, onDismiss, onNavigate }: Props) {
     setVisible(true);
     if (timerRef.current) clearTimeout(timerRef.current);
     timerRef.current = setTimeout(() => dismiss(), 10_000);
-
     return () => { if (timerRef.current) clearTimeout(timerRef.current); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [signal]);
 
   function dismiss() {
     setLeaving(true);
-    setTimeout(() => { setVisible(false); setLeaving(false); onDismiss(); }, 300);
+    setTimeout(() => { setVisible(false); setLeaving(false); onDismiss(); }, 280);
   }
 
   if (!visible || !signal) return null;
 
-  const isLong  = signal.signal === "LONG";
-  const color   = isLong ? GREEN : RED;
-  const dimBg   = isLong ? "rgba(78,207,138,0.06)" : "rgba(207,78,78,0.06)";
-  const border_ = isLong ? "rgba(78,207,138,0.3)"  : "rgba(207,78,78,0.3)";
+  const isLong   = signal.signal === "LONG";
+  const color    = isLong ? GREEN : RED;
+  const dimBg    = isLong ? "rgba(78,207,138,0.04)" : "rgba(207,78,78,0.04)";
+  const borderC  = isLong ? "rgba(78,207,138,0.25)" : "rgba(207,78,78,0.25)";
   const summary: Partial<AISignalSummary> = signal.summary ?? {};
 
   return (
     <div
+      role="alert"
+      aria-live="assertive"
+      aria-atomic="true"
       onClick={onNavigate}
       style={{
         position: "fixed",
         top: 48,
         right: 16,
         zIndex: 9999,
-        width: 280,
+        width: 292,
         background: "#0d0d0d",
-        border: `1px solid ${border_}`,
+        border: `1px solid ${borderC}`,
         borderLeft: `3px solid ${color}`,
         borderRadius: 5,
         padding: "12px 14px",
         cursor: "pointer",
         opacity: leaving ? 0 : 1,
-        transform: leaving ? "translateX(20px)" : "translateX(0)",
-        transition: "opacity 0.3s, transform 0.3s",
-        boxShadow: `0 4px 24px rgba(0,0,0,0.6), 0 0 12px ${color}22`,
+        transform: leaving ? "translateX(14px)" : "translateX(0)",
+        transition: "opacity 0.28s cubic-bezier(0.4,0,1,1), transform 0.28s cubic-bezier(0.4,0,1,1)",
+        boxShadow: `0 6px 32px rgba(0,0,0,0.7), 0 0 16px ${color}15`,
+        animation: leaving ? undefined : "slide-right-in 0.28s cubic-bezier(0.16,1,0.3,1)",
       }}
     >
       {/* Close button */}
       <button
         onClick={e => { e.stopPropagation(); dismiss(); }}
+        aria-label="Dismiss signal alert"
         style={{
-          position: "absolute", top: 6, right: 8,
-          background: "none", border: "none", color: "#333",
-          cursor: "pointer", fontSize: 12, lineHeight: 1,
+          position: "absolute",
+          top: 8,
+          right: 9,
+          background: "none",
+          border: "none",
+          color: "#444",
+          cursor: "pointer",
+          padding: 2,
+          lineHeight: 1,
+          borderRadius: 2,
+          display: "flex",
+          alignItems: "center",
+          transition: "color 0.1s",
         }}
-      >×</button>
+        onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.color = "#888"; }}
+        onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.color = "#444"; }}
+      >
+        <CloseIcon />
+      </button>
 
-      {/* Header */}
-      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+      {/* Badge row */}
+      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
         <div style={{
-          width: 6, height: 6, borderRadius: "50%",
-          background: color, boxShadow: `0 0 6px ${color}`,
-          animation: "pulse-dot 1.5s infinite",
+          width: 5,
+          height: 5,
+          borderRadius: "50%",
+          background: color,
+          boxShadow: `0 0 6px ${color}bb`,
+          animation: "pulse-dot 1.5s ease-in-out infinite",
+          flexShrink: 0,
         }} />
-        <span style={{ fontFamily: mono, fontSize: 8, color: "#444", letterSpacing: "0.08em" }}>
+        <span style={{
+          fontFamily: mono,
+          fontSize: 8,
+          color: "#555",
+          letterSpacing: "0.10em",
+          fontWeight: 500,
+        }}>
           AI SIGNAL ALERT
+        </span>
+        <div style={{ flex: 1 }} />
+        <span style={{
+          fontFamily: mono,
+          fontSize: 8,
+          color: "#444",
+          letterSpacing: "0.04em",
+        }}>
+          {signal.interval}
         </span>
       </div>
 
       {/* Coin + direction */}
-      <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 5 }}>
-        <span style={{ fontFamily: sans, fontWeight: 800, fontSize: 16, color: "#e8e8e8" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+        <span style={{ fontFamily: sans, fontWeight: 800, fontSize: 17, color: "#e8e8e8", letterSpacing: "-0.02em" }}>
           {signal.coin}
         </span>
-        <span style={{ fontFamily: mono, fontSize: 8, color: "#444" }}>
-          /USDC · {signal.interval}
-        </span>
-        <span style={{
-          fontFamily: mono, fontSize: 11, fontWeight: 700, color,
+        <span style={{ fontFamily: mono, fontSize: 9, color: "#444" }}>/USDC</span>
+
+        {/* Direction chip */}
+        <div style={{
           marginLeft: "auto",
+          display: "flex",
+          alignItems: "center",
+          gap: 5,
+          padding: "3px 8px",
+          borderRadius: 3,
+          background: dimBg,
+          border: `1px solid ${borderC}`,
         }}>
-          {isLong ? "↑ LONG" : "↓ SHORT"} {signal.confidence}%
-        </span>
+          <span style={{ fontFamily: mono, fontSize: 11, fontWeight: 700, color }}>
+            {isLong ? "↑" : "↓"}
+          </span>
+          <span style={{ fontFamily: mono, fontSize: 10, fontWeight: 700, color }}>
+            {isLong ? "LONG" : "SHORT"}
+          </span>
+          <span style={{ fontFamily: mono, fontSize: 10, color: color, opacity: 0.7 }}>
+            {signal.confidence}%
+          </span>
+        </div>
       </div>
 
       {/* Entry / SL / TP */}
-      {summary.entry ? (
-        <div style={{ display: "flex", gap: 12, marginBottom: 6 }}>
-          <div>
-            <div style={{ fontFamily: mono, fontSize: 7, color: "#2a2a2a" }}>ENTRY</div>
-            <div style={{ fontFamily: sans, fontWeight: 600, fontSize: 11, color: "#e8e8e8" }}>
-              {fmtPx(summary.entry)}
-            </div>
-          </div>
-          {summary.stop_loss ? (
-            <div>
-              <div style={{ fontFamily: mono, fontSize: 7, color: "#2a2a2a" }}>SL</div>
-              <div style={{ fontFamily: sans, fontWeight: 600, fontSize: 11, color: RED }}>
-                {fmtPx(summary.stop_loss)}
-              </div>
-            </div>
-          ) : null}
-          {summary.take_profit ? (
-            <div>
-              <div style={{ fontFamily: mono, fontSize: 7, color: "#2a2a2a" }}>TP</div>
-              <div style={{ fontFamily: sans, fontWeight: 600, fontSize: 11, color: GREEN }}>
-                {fmtPx(summary.take_profit)}
-              </div>
-            </div>
-          ) : null}
-          {summary.risk_reward ? (
-            <div>
-              <div style={{ fontFamily: mono, fontSize: 7, color: "#2a2a2a" }}>R:R</div>
-              <div style={{ fontFamily: sans, fontWeight: 600, fontSize: 11, color: "#cfad4e" }}>
-                {summary.risk_reward}
-              </div>
-            </div>
-          ) : null}
+      {summary.entry && summary.entry > 0 && (
+        <div style={{
+          display: "flex",
+          gap: 14,
+          marginBottom: 10,
+          padding: "8px 10px",
+          background: "rgba(255,255,255,0.02)",
+          borderRadius: 3,
+          border: "1px solid #181818",
+        }}>
+          <PriceItem label="Entry" value={fmtPx(summary.entry)} />
+          {summary.stop_loss && summary.stop_loss > 0 && (
+            <PriceItem label="SL" value={fmtPx(summary.stop_loss)} color={RED} />
+          )}
+          {summary.take_profit && summary.take_profit > 0 && (
+            <PriceItem label="TP" value={fmtPx(summary.take_profit)} color={GREEN} />
+          )}
+          {summary.risk_reward && (
+            <PriceItem label="R:R" value={summary.risk_reward} color="#cfad4e" />
+          )}
         </div>
-      ) : null}
+      )}
 
       {/* Reasoning snippet */}
       <p style={{
-        fontFamily: mono, fontSize: 8, color: "#555",
-        lineHeight: 1.6, margin: 0,
+        fontFamily: mono,
+        fontSize: 9,
+        color: "#666",
+        lineHeight: 1.65,
+        margin: 0,
+        marginBottom: 8,
       }}>
-        {signal.reasoning?.slice(0, 120)}{signal.reasoning?.length > 120 ? "…" : ""}
+        {signal.reasoning?.slice(0, 120)}{(signal.reasoning?.length ?? 0) > 120 ? "…" : ""}
       </p>
 
-      <div style={{ fontFamily: mono, fontSize: 7, color: "#222", marginTop: 6 }}>
+      <div style={{
+        fontFamily: mono,
+        fontSize: 8,
+        color: "#333",
+        letterSpacing: "0.04em",
+      }}>
         Click to view all signals →
       </div>
     </div>
