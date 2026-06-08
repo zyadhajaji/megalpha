@@ -547,91 +547,356 @@ function pxR(rects: PixR[], s: number) {
   ));
 }
 
-/** Strategy A — THE SHADOW (hooded rogue, amber cloak) */
-function PixShadow({ s = 4 }: { s?: number }) {
-  const H1 = "#7a3800"; const H2 = "#3d1c00";
-  const F  = "#f0c49a"; const E  = "#e02828";
-  const B  = "#4e2800"; const G  = "#cfad4e"; const L = "#281400";
+/**
+ * Strategy A — THE SHADOW
+ * Terraria Shadow Armor rogue. Hood + dual daggers + glowing eyes.
+ * Grid: 12 cols × 24 rows, rendered at scale s.
+ */
+function PixShadow({ s = 3 }: { s?: number }) {
+  // Palette
+  const HK = "#1e0c00"; // hood inner-dark
+  const HD = "#4a2000"; // hood mid
+  const HM = "#7a3800"; // hood outer
+  const HL = "#a04e14"; // hood light edge
+  const SK = "#f0c49a"; // skin
+  const SH = "#d0a870"; // skin shadow
+  const EY = "#ff2828"; // glowing red eye
+  const CA = "#3a1c00"; // cloak dark
+  const CM = "#5e3210"; // cloak mid
+  const CL = "#8a5228"; // cloak highlight
+  const GD = "#cfad4e"; // gold
+  const GL = "#e8c85a"; // gold light
+  const LD = "#1a0e00"; // leg/boot
+  const LM = "#2e1800"; // leg mid
+  const BL = "#c8c8d0"; // blade
+  const HN = "#8a6028"; // dagger handle
+  const PU = "#8844cc"; // purple magic
   return (
     <g>
       {pxR([
-        [3,0, 3,1, H1],[2,1, 5,1, H1],[1,2, 7,1, H1],          // hood peak
-        [1,3, 1,4, H2],[7,3, 1,4, H2],                          // hood sides
-        [2,3, 5,4, F],                                           // face
-        [2,4, 1,1, E],[6,4, 1,1, E],                            // eyes
-        [1,7, 7,1, G],                                           // gold shoulders
-        [0,8, 9,4, B],                                           // cloak body
-        [2,12, 2,4, H2],[5,12, 2,4, H2],                        // legs
-        [1,16, 3,1, L],[5,16, 3,1, L],                          // boots
+        // == HOOD PEAK (tapered 4 layers) ==
+        [4,0, 4,1, HK],
+        [3,1, 6,1, HD],
+        [2,2, 8,1, HM],
+        [1,3, 10,1, HM],
+        [0,4, 12,1, HL],        // brim edge (highlight)
+        // == HOOD FRAME (sides) ==
+        [0,5, 2,4, HK], [10,5, 2,4, HK],
+        [0,9, 2,2, HD], [10,9, 2,2, HD],
+        // == FACE ==
+        [2,5, 8,1, SK],         // forehead
+        [2,6, 8,2, SK],         // face body
+        [2,8, 8,1, SH],         // chin shadow
+        // == EYES (glowing 2px wide) ==
+        [2,6, 2,1, EY],
+        [8,6, 2,1, EY],
+        // == SMIRK ==
+        [4,8, 4,1, HK],
+        // == GOLD SHOULDER BAND ==
+        [1,11, 10,1, GD],
+        [0,12, 2,1, GL], [10,12, 2,1, GL],  // epaulettes
+        // == CLOAK BODY ==
+        [0,12, 12,2, CM],
+        [0,14, 12,2, CA],
+        [1,16, 10,2, CA],
+        [2,18, 8,1, CM],
+        // == GOLD EDGE TRIM ==
+        [0,12, 1,7, GD], [11,12, 1,7, GD],
+        // == BELT ==
+        [3,19, 6,1, HK],
+        [5,19, 2,1, GL],         // buckle
+        // == LEGS ==
+        [3,20, 2,3, LD],
+        [7,20, 2,3, LD],
+        // == BOOTS ==
+        [2,23, 3,1, LM],
+        [7,23, 3,1, LM],
+        [2,24, 4,1, LD],         // toe wider
+        [6,24, 4,1, LD],
+        // == LEFT DAGGER (col -2) ==
+        [-2,12, 1,7, BL],        // blade left
+        [-2,19, 1,2, HN],        // handle
+        [-3,12, 1,1, BL],        // tip
+        // == RIGHT DAGGER (col 13) ==
+        [13,12, 1,7, BL],
+        [13,19, 1,2, HN],
+        [14,12, 1,1, BL],
+        // == SHADOW PARTICLES ==
+        [4,2, 1,1, PU], [7,2, 1,1, PU],
+        [2,3, 1,1, PU], [9,3, 1,1, PU],
       ], s)}
     </g>
   );
 }
 
-/** Strategy B — THE PROPHET (blue-robed mage with staff) */
-function PixProphet({ s = 4 }: { s?: number }) {
-  const H1 = "#3a5ea0"; const H2 = "#1e3870";
-  const F  = "#f0d8b0"; const E  = "#5ad0ff";
-  const R  = "#2e5490"; const G  = "#cfad4e";
-  const L  = "#1a2e58"; const S  = "#8a9ab8";
+/**
+ * Strategy B — THE PROPHET
+ * Terraria Wizard / Mage Robe. Tall star hat + glowing staff + rune robe.
+ * Grid: 12 cols × 26 rows.
+ */
+function PixProphet({ s = 3 }: { s?: number }) {
+  const HK = "#0e1c50"; // hat darkest
+  const HD = "#1e3488"; // hat dark
+  const HM = "#2e50b0"; // hat mid
+  const HL = "#4870d0"; // hat light
+  const HX = "#6090e8"; // hat highlight
+  const SK = "#f0d8b0"; // skin
+  const SH = "#d0b890"; // skin shadow
+  const EY = "#40d8ff"; // mage cyan eye
+  const EG = "#90f0ff"; // eye glow
+  const RK = "#16285a"; // robe dark
+  const RM = "#2040880"; // robe mid — fix this
+  const RL = "#2e5898"; // robe light
+  const RX = "#4070b8"; // robe highlight
+  const GD = "#cfad4e"; // gold rune
+  const GL = "#e8c85a"; // gold bright
+  const CY = "#70e8ff"; // cyan crystal
+  const ST = "#8898b8"; // staff wood
+  const LB = "#1a2e5a"; // leg dark
+  const LM = "#2a4280"; // leg mid
+  const SB = "#4898ff"; // star sparkle
+  const WH = "#f0f8ff"; // white spark
+
   return (
     <g>
       {pxR([
-        [3,0, 3,1, H2],[2,1, 5,1, H2],[4,0, 1,2, G],            // hat + tip
-        [1,2, 7,1, H1],[0,3, 9,1, H1],                           // hat brim
-        [2,4, 5,4, F],                                            // face
-        [2,5, 1,1, E],[6,5, 1,1, E],                             // eyes
-        [1,8, 7,1, G],                                            // robe band
-        [0,9, 9,4, R],                                            // robe
-        [1,13, 3,4, L],[5,13, 3,4, L],                           // legs
-        [9,7, 1,8, S],[9,6, 2,1, S],[9,5, 3,1, S],              // staff
-        [10,5, 1,2, G],                                           // staff crystal
+        // == HAT (tall pyramid, 5 layers) ==
+        [5,0, 2,1, HK],          // tip
+        [4,1, 4,2, HK],
+        [3,3, 6,2, HD],
+        [2,5, 8,2, HM],
+        [1,7, 10,1, HL],         // lower hat
+        [0,8, 12,2, HX],         // brim (widest)
+        [0,9, 12,1, HK],         // brim shadow
+        // Hat stars
+        [5,2, 1,1, GL], [7,4, 1,1, SB],
+        [3,4, 1,1, WH], [8,6, 1,1, GL],
+        // == HEAD ==
+        [2,10, 8,4, SK],
+        [2,13, 8,1, SH],         // chin
+        // == EYES (wide mage stare) ==
+        [2,11, 2,1, EY], [2,11, 2,1, EG],
+        [8,11, 2,1, EY], [8,11, 2,1, EG],
+        [2,12, 2,1, EY],
+        [8,12, 2,1, EY],
+        // Third-eye rune mark on forehead
+        [5,10, 2,1, CY],
+        // == NECK + COLLAR ==
+        [4,14, 4,1, SK],
+        [1,15, 10,1, GD],        // gold collar
+        // == ROBE ==
+        [0,16, 12,2, RX],        // upper robe
+        [0,18, 12,3, RL],        // robe body
+        [0,21, 12,2, RM],        // lower robe
+        [1,23, 10,1, RK],        // hem
+        // Rune symbols on robe
+        [3,17, 2,2, GD],         // left rune
+        [7,17, 2,2, GD],         // right rune
+        [5,20, 2,2, CY],         // center rune
+        // == LEGS ==
+        [3,24, 2,3, LB],
+        [7,24, 2,3, LB],
+        // Boots
+        [2,27, 4,1, LM],
+        [7,27, 4,1, HK],
+        // == STAFF (right side, col 13-14) ==
+        [13,9, 1,16, ST],        // staff shaft
+        [12,7, 3,2, ST],         // upper shaft
+        [11,5, 4,2, ST],         // staff top
+        [10,4, 2,1, CY],         // crystal base
+        [11,3, 2,2, CY],         // crystal
+        [12,2, 1,1, WH],         // crystal tip glow
+        [13,25, 1,1, GD],        // staff foot
       ], s)}
     </g>
   );
 }
 
-/** Strategy C — THE EXCAVATOR (gold miner with hard hat) */
-function PixExcavator({ s = 4 }: { s?: number }) {
-  const H1 = "#cfad4e"; const H2 = "#8a7430";
-  const F  = "#f0c49a"; const E  = "#2a1800";
-  const O  = "#7a4218"; const L  = "#4a2c0e";
-  const P  = "#c87818"; const GR = "#4a9a24";
+/**
+ * Strategy C — THE EXCAVATOR
+ * Terraria Miner with hard hat + headlamp + overalls + gold pickaxe.
+ * Grid: 14 cols × 26 rows.
+ */
+function PixExcavator({ s = 3 }: { s?: number }) {
+  const HY = "#cfad4e"; // hard hat yellow
+  const HM = "#a08a2e"; // hat mid
+  const HK = "#7a6822"; // hat shadow
+  const HB = "#4a4018"; // hat brim
+  const LP = "#ffe060"; // lamp
+  const LG = "#fff8a0"; // lamp glow
+  const SK = "#f0c490"; // skin
+  const SH = "#d0a478"; // skin shadow
+  const EK = "#2a1400"; // dark eyes
+  const BD = "#8a5020"; // shirt/body dark
+  const BM = "#b07040"; // body mid
+  const OD = "#7a4818"; // overalls dark
+  const OM = "#9a6030"; // overalls mid
+  const OL = "#b07848"; // overalls light
+  const TL = "#d0b060"; // tool belt
+  const GD = "#cfad4e"; // gold
+  const GL = "#e8c85a"; // gold bright
+  const PE = "#d09030"; // pick handle
+  const PI = "#c0b890"; // pick iron
+  const PD = "#907868"; // pick dark
+  const BT = "#3a2008"; // boot dark
+  const BM2 = "#6a4020"; // boot mid
+  const OR = "#ff8020"; // ore orange
+
   return (
     <g>
       {pxR([
-        [1,0, 7,2, H1],[0,2, 9,1, H2],                          // hard hat
-        [2,3, 5,4, F],                                            // face
-        [2,4, 1,1, E],[6,4, 1,1, E],                             // eyes
-        [3,6, 3,1, E],                                            // grin
-        [0,7, 9,5, O],                                            // overalls
-        [1,9, 7,1, GR],                                           // bib accent
-        [1,12, 3,4, L],[5,12, 3,4, L],                           // legs
-        [0,16, 4,1, L],[5,16, 4,1, L],                           // boots
-        [9,4, 2,1, P],[9,5, 2,1, P],[9,6, 1,5, H2],             // pickaxe
+        // == HARD HAT (rounded brim) ==
+        [2,0, 8,1, HY],          // top
+        [1,1, 10,2, HY],         // dome
+        [0,3, 12,1, HM],         // lower dome
+        [0,4, 12,1, HB],         // brim
+        // Headlamp
+        [1,1, 3,2, LP],
+        [0,2, 1,1, LG],          // lamp glow
+        // == HEAD ==
+        [2,5, 8,4, SK],
+        [2,8, 8,1, SH],          // chin
+        // == EYES (cheery wide) ==
+        [2,6, 2,1, EK],
+        [8,6, 2,1, EK],
+        [3,7, 1,1, SK],          // eyebrow raise
+        [8,7, 1,1, SK],
+        // == BIG GRIN ==
+        [3,8, 6,1, EK],
+        [3,9, 1,1, SK],[8,9, 1,1, SK], // tooth gaps
+        // == COLLAR / SHIRT NECK ==
+        [4,9, 4,1, SK],
+        [2,10, 8,1, BM],         // collar
+        // == BODY (shirt + overalls) ==
+        [0,11, 12,2, BD],        // shirt arms
+        [2,11, 8,2, BM],         // chest
+        [2,13, 8,3, OM],         // overalls bib
+        [0,13, 2,3, OD],         // arm left
+        [10,13, 2,3, OD],        // arm right
+        [1,16, 10,2, OD],        // overalls lower
+        // Strap details
+        [3,13, 1,3, OL],         // left strap
+        [8,13, 1,3, OL],         // right strap
+        // Tool belt
+        [2,18, 8,1, TL],
+        [4,18, 2,1, GL],         // gold buckle
+        // Gold ore on belt
+        [7,18, 1,1, GL],
+        // == LEGS ==
+        [2,19, 3,4, OD],
+        [7,19, 3,4, OD],
+        // == BOOTS ==
+        [1,23, 4,1, BM2],
+        [7,23, 4,1, BM2],
+        [1,24, 5,1, BT],         // toe
+        [6,24, 5,1, BT],
+        // == GOLD PICKAXE (right side) ==
+        [12,8, 3,1, PI],         // head top
+        [12,9, 3,2, PI],         // head body
+        [14,7, 1,2, PD],         // head spike top
+        [14,11, 1,2, PD],        // head spike bottom
+        [13,11, 2,10, PE],       // handle
+        // == ORE PIECES in pockets ==
+        [0,21, 2,2, OR],
+        [1,20, 1,1, GL],
       ], s)}
     </g>
   );
 }
 
-/** Strategy D — THE COMMANDER (armored knight with sword) */
-function PixCommander({ s = 4 }: { s?: number }) {
-  const A1 = "#7a8aaa"; const A2 = "#4a5a74";
-  const V  = "#cfad4e"; const E  = "#5ad0ff";
-  const P  = "#2a3a54"; const S  = "#c0c8d8"; const R = "#3a5080";
+/**
+ * Strategy D — THE COMMANDER
+ * Terraria Solar / Hallowed Armor knight. Full plate, glowing visor, sword + shield.
+ * Grid: 14 cols × 26 rows.
+ */
+function PixCommander({ s = 3 }: { s?: number }) {
+  const AK = "#1a2438"; // armor darkest
+  const AD = "#253450"; // armor dark
+  const AM = "#3a4e70"; // armor mid
+  const AL = "#546888"; // armor light
+  const AX = "#7a8eaa"; // armor highlight
+  const AW = "#a0b4cc"; // armor bright
+  const VK = "#a07c00"; // visor gold dark
+  const VM = "#cfad4e"; // visor gold
+  const VL = "#e8c85a"; // visor gold bright
+  const EY = "#5ad0ff"; // cyan eye glow
+  const EG = "#c0f0ff"; // eye glow bright
+  const BD = "#0a1020"; // boot dark
+  const BM = "#1a2840"; // boot mid
+  const BL = "#d0d8e8"; // sword blade
+  const BS = "#e8f0f8"; // blade shimmer
+  const SH = "#586878"; // shield
+  const SL = "#7a8a9a"; // shield light
+  const GD = "#cfad4e"; // gold detail
+  const GL = "#e8c85a"; // gold bright
+  const RE = "#4080cc"; // blue rune glow
+
   return (
     <g>
       {pxR([
-        [2,0, 5,1, A2],[1,1, 7,1, A1],[0,2, 9,2, A1],           // helmet
-        [1,4, 7,2, V],                                            // visor gold
-        [2,3, 5,1, E],[2,6, 5,1, E],                             // eye glow
-        [0,6, 9,5, A1],                                           // chest
-        [1,7, 7,1, V],                                            // chest emblem
-        [0,11, 4,4, P],[5,11, 4,4, P],                           // leg armor
-        [0,15, 4,1, R],[5,15, 4,1, R],                           // boots
-        [9,5, 1,8, S],[9,4, 2,1, S],[9,3, 3,1, S],              // sword blade
-        [8,12, 2,1, V],                                           // sword guard
-        [8,13, 1,2, S],                                           // sword handle
+        // == HELMET (full plate, distinctive) ==
+        [3,0, 6,1, AK],          // top plate
+        [2,1, 8,1, AD],          // upper helmet
+        [1,2, 10,2, AM],         // helmet body
+        [0,4, 12,2, AL],         // lower helmet
+        // Visor slot (gold)
+        [1,5, 10,2, VM],
+        [2,5, 8,2, VL],          // visor glow
+        // Eye glow behind visor
+        [1,5, 3,2, EY],
+        [8,5, 3,2, EY],
+        [2,5, 2,2, EG],
+        [8,5, 2,2, EG],
+        // Chin guard
+        [2,7, 8,1, AD],
+        [3,8, 6,1, AK],
+        // == PAULDRONS (shoulder plates, extend beyond body) ==
+        [-2,9, 3,4, AL],         // left pauldron
+        [-2,10, 3,1, AX],        // pauldron highlight
+        [13,9, 3,4, AL],         // right pauldron
+        [13,10, 3,1, AX],
+        // Pauldron joints
+        [0,9, 2,3, AM],
+        [10,9, 2,3, AM],
+        // == CHEST PLATE ==
+        [0,12, 12,2, AX],        // upper chest
+        [0,14, 12,1, AW],        // chest highlight
+        [0,15, 12,2, AL],        // lower chest
+        // Gold emblem
+        [4,12, 4,2, VM],
+        [5,13, 2,2, VL],
+        // Blue rune glow
+        [3,14, 2,1, RE],
+        [7,14, 2,1, RE],
+        // == BELLY ARMOR ==
+        [1,17, 10,2, AM],
+        [2,19, 8,1, AD],
+        // == LEG ARMOR (articulated) ==
+        [0,20, 5,2, AL],         // left thigh
+        [7,20, 5,2, AL],
+        [1,22, 3,2, AM],         // left shin
+        [8,22, 3,2, AM],
+        // Knee caps
+        [1,21, 3,1, AX],
+        [8,21, 3,1, AX],
+        // == BOOTS ==
+        [0,24, 5,1, BM],
+        [7,24, 5,1, BM],
+        [0,25, 6,1, BD],         // toe overhang
+        [6,25, 6,1, BD],
+        // == SWORD (right side) ==
+        [13,7, 2,14, BL],        // blade
+        [14,7, 1,14, BS],        // blade shimmer
+        [12,5, 5,1, BL],         // crossguard
+        [12,6, 5,1, BL],
+        [12,5, 5,2, GD],         // gold guard
+        [13,21, 2,4, VM],        // pommel
+        // == SHIELD (left side) ==
+        [-4,10, 3,10, SH],       // shield body
+        [-4,10, 3,1, GL],        // shield top
+        [-4,19, 3,1, GL],        // shield bottom
+        [-4,14, 3,1, SL],        // shield highlight
+        [-3,12, 1,5, GL],        // shield emblem
       ], s)}
     </g>
   );
@@ -769,16 +1034,162 @@ function BiomeBackground({ label }: { label: string }) {
   return <BiomeCastle />;
 }
 
-function PixelCharacter({ label, s = 4 }: { label: string; s?: number }) {
-  const w = 12 * s; const h = 18 * s;
+// Pad col-space on each side (for daggers, pauldrons, staff, shield)
+const PIX_EXTRA = 5; // extra columns of padding each side
+
+function PixelCharacter({ label, s = 3 }: { label: string; s?: number }) {
+  const bodyW = 12; // body grid width for A/B
+  const bodyWide = 14; // body grid width for C/D (wider armor)
+  const isWide = label === "C" || label === "D";
+  const bw = isWide ? bodyWide : bodyW;
+  const rows = label === "B" ? 29 : label === "D" ? 27 : 26;
+  const totalCols = bw + PIX_EXTRA * 2;
+  const w = totalCols * s;
+  const h = rows * s;
+  const ox = PIX_EXTRA * s; // shift group right so col -5 = x=0
+
   return (
     <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`}
       style={{ imageRendering: "pixelated", overflow: "visible" }}
       shapeRendering="crispEdges">
-      {label === "A" && <PixShadow s={s} />}
-      {label === "B" && <PixProphet s={s} />}
-      {label === "C" && <PixExcavator s={s} />}
-      {label === "D" && <PixCommander s={s} />}
+      <g transform={`translate(${ox}, 0)`}>
+        {label === "A" && <PixShadow s={s} />}
+        {label === "B" && <PixProphet s={s} />}
+        {label === "C" && <PixExcavator s={s} />}
+        {label === "D" && <PixCommander s={s} />}
+      </g>
+    </svg>
+  );
+}
+
+// ── Strategy mini-visualizations (embedded live in card scene) ─────────────────
+
+/** Mini strategy animation shown IN the card scene */
+function StratMiniViz({ label, color }: { label: string; color: string }) {
+  if (label === "A") return (
+    // Stop Hunt: sweeping wick below support → reversal
+    <svg width="96" height="52" viewBox="0 0 96 52" style={{ imageRendering: "auto" }}>
+      <rect width="96" height="52" fill="rgba(0,0,0,0.55)" rx="4"/>
+      <rect x="0" y="20" width="96" height="6" fill={`${color}12`}/>
+      <line x1="0" y1="23" x2="96" y2="23" stroke={color} strokeWidth="0.8" strokeDasharray="3,2" opacity="0.5"/>
+      <text x="80" y="20" fill={color} fontSize="4.5" fontFamily="monospace" opacity="0.6">SUP</text>
+      {/* Candles */}
+      <line x1="10" y1="8" x2="10" y2="12" stroke="#3aaa72" strokeWidth="1"/>
+      <rect x="7" y="12" width="6" height="12" fill="#3aaa72" rx="0.5"/>
+      <line x1="10" y1="24" x2="10" y2="27" stroke="#3aaa72" strokeWidth="1"/>
+      <line x1="20" y1="6" x2="20" y2="10" stroke="#3aaa72" strokeWidth="1"/>
+      <rect x="17" y="10" width="6" height="14" fill="#3aaa72" rx="0.5"/>
+      <line x1="20" y1="24" x2="20" y2="27" stroke="#3aaa72" strokeWidth="1"/>
+      {/* Stop hunt wick */}
+      <line x1="30" y1="12" x2="30" y2="16" stroke="#cf4e4e" strokeWidth="1"/>
+      <rect x="27" y="16" width="6" height="8" fill="#cf4e4e" rx="0.5"/>
+      <line x1="30" y1="24" x2="30" y2="42" stroke="#cf4e4e" strokeWidth="1.5"
+        style={{ animation: "vizCandle 1.8s ease-out 0.2s both", transformBox: "fill-box" }}/>
+      <text x="22" y="48" fill="#cf4e4e" fontSize="4" fontFamily="monospace" opacity="0.8">SWEEP↓</text>
+      {/* Reversal candle */}
+      <line x1="42" y1="4" x2="42" y2="8" stroke="#4ecf8a" strokeWidth="1"/>
+      <rect x="39" y="8" width="6" height="16" fill="#4ecf8a" rx="0.5"
+        style={{ animation: "vizCandle 0.5s ease-out 1s both", transformBox: "fill-box" }}/>
+      {/* Arrow up */}
+      <path d="M54,30 L54,12 M51,18 L54,12 L57,18" fill="none" stroke="#4ecf8a"
+        strokeWidth="1.2" strokeLinecap="round" opacity="0.7"
+        style={{ animation: "vizCandle 0.4s ease-out 1.4s both", transformBox: "fill-box" }}/>
+      {/* Scanning zone right */}
+      <rect x="68" y="6" width="24" height="36" fill="none" stroke="#1e1e1e"
+        strokeWidth="0.8" strokeDasharray="2,3" rx="2"/>
+      <text x="80" y="27" fill="#252525" fontSize="5" fontFamily="monospace" textAnchor="middle">WATCH</text>
+    </svg>
+  );
+
+  if (label === "B") return (
+    // EMA Cross: two animated waveforms converging then crossing
+    <svg width="96" height="52" viewBox="0 0 96 52" style={{ imageRendering: "auto" }}>
+      <rect width="96" height="52" fill="rgba(0,0,0,0.55)" rx="4"/>
+      {[14,28,42].map(y => (
+        <line key={y} x1="0" y1={y} x2="96" y2={y} stroke="#181818" strokeWidth="0.5"/>
+      ))}
+      {/* EMA 55 smooth blue */}
+      <path d="M2,34 C20,30 38,32 55,27 C72,22 82,24 94,20"
+        fill="none" stroke={BLUE} strokeWidth="1.8" strokeLinecap="round"
+        strokeDasharray="180" style={{ animation: "vizDraw 2s ease-out 0.1s both" }}/>
+      {/* EMA 21 volatile green */}
+      <path d="M2,30 C12,22 20,38 32,26 C44,14 52,34 64,22 C76,10 84,28 94,16"
+        fill="none" stroke={GREEN} strokeWidth="1.8" strokeLinecap="round"
+        strokeDasharray="200" style={{ animation: "vizDraw 1.6s ease-out 0s both" }}/>
+      {/* Cross marker */}
+      <circle cx="60" cy="24" r="4" fill="none" stroke={AMBER} strokeWidth="1.4" opacity="0.8"
+        style={{ animation: "vizCandle 0.4s ease-out 1.8s both", transformBox: "fill-box" }}/>
+      <path d="M58,21 L60,17 L62,21" fill="none" stroke={AMBER} strokeWidth="1" opacity="0.7"
+        style={{ animation: "vizCandle 0.4s ease-out 2s both", transformBox: "fill-box" }}/>
+      <text x="2" y="48" fill={BLUE} fontSize="4.5" fontFamily="monospace" opacity="0.7">EMA55</text>
+      <text x="28" y="48" fill={GREEN} fontSize="4.5" fontFamily="monospace" opacity="0.7">EMA21</text>
+      <text x="60" y="48" fill={AMBER} fontSize="4.5" fontFamily="monospace" textAnchor="middle" opacity="0.7">⚡CROSS</text>
+      {/* ADX bar */}
+      <rect x="74" y="42" width="18" height="3" fill="#141414" rx="1"/>
+      <rect x="74" y="42" width="10" height="3" fill={BLUE} rx="1" opacity="0.5"
+        style={{ animation: "vizCandle 1s ease-out 0.5s both", transformBox: "fill-box" }}/>
+    </svg>
+  );
+
+  if (label === "C") return (
+    // FVG Gold: candles with pulsing fair-value gap
+    <svg width="96" height="52" viewBox="0 0 96 52" style={{ imageRendering: "auto" }}>
+      <rect width="96" height="52" fill="rgba(0,0,0,0.55)" rx="4"/>
+      {/* Green candles */}
+      <line x1="10" y1="8" x2="10" y2="12" stroke="#3aaa72" strokeWidth="1"/>
+      <rect x="7" y="12" width="6" height="14" fill="#3aaa72" rx="0.5"/>
+      <line x1="20" y1="6" x2="20" y2="10" stroke="#3aaa72" strokeWidth="1"/>
+      <rect x="17" y="10" width="6" height="16" fill="#3aaa72" rx="0.5"/>
+      {/* FVG gap */}
+      <rect x="28" y="10" width="18" height="16" fill={`${color}30`} rx="2"
+        style={{ animation: "goldShimmer 1.4s ease-in-out infinite" }}/>
+      <rect x="28" y="10" width="18" height="16" fill="none"
+        stroke={color} strokeWidth="1.2" strokeDasharray="3,2" rx="2" opacity="0.8"/>
+      <text x="37" y="21" fill={color} fontSize="6" fontFamily="monospace"
+        textAnchor="middle" fontWeight="700">FVG</text>
+      {/* More candles */}
+      <line x1="52" y1="4" x2="52" y2="8" stroke="#3aaa72" strokeWidth="1"/>
+      <rect x="49" y="8" width="6" height="18" fill="#3aaa72" rx="0.5"/>
+      <line x1="62" y1="8" x2="62" y2="12" stroke="#cf4e4e" strokeWidth="1"/>
+      <rect x="59" y="12" width="6" height="14" fill="#cf4e4e" rx="0.5"/>
+      {/* Fill arrow */}
+      <line x1="72" y1="18" x2="88" y2="18" stroke={color} strokeWidth="1.5" strokeLinecap="round"
+        style={{ animation: "vizDraw 1s ease-out 1.2s both", strokeDasharray: "40" }}/>
+      <path d="M74,15 L70,18 L74,21" fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round"
+        style={{ animation: "vizCandle 0.4s ease-out 1.8s both", transformBox: "fill-box" }}/>
+      <text x="80" y="30" fill={color} fontSize="5" fontFamily="monospace" textAnchor="middle" opacity="0.6">FILL</text>
+      {/* Labels */}
+      <text x="2" y="48" fill={color} fontSize="4.5" fontFamily="monospace" opacity="0.7">GOLD FVG SCAN</text>
+    </svg>
+  );
+
+  // Label D — unified radar
+  const cx = 48; const cy = 28; const r = 20; const ri = 7;
+  const segments = 8;
+  const paths = Array.from({ length: segments }, (_, i) => {
+    const a0 = (i / segments) * Math.PI * 2 - Math.PI / 2;
+    const a1 = ((i + 1) / segments) * Math.PI * 2 - Math.PI / 2;
+    const x0o = cx + r * Math.cos(a0); const y0o = cy + r * Math.sin(a0);
+    const x1o = cx + r * Math.cos(a1); const y1o = cy + r * Math.sin(a1);
+    const x0i = cx + ri * Math.cos(a0); const y0i = cy + ri * Math.sin(a0);
+    const x1i = cx + ri * Math.cos(a1); const y1i = cy + ri * Math.sin(a1);
+    return `M${x0i},${y0i} L${x0o},${y0o} A${r},${r} 0 0,1 ${x1o},${y1o} L${x1i},${y1i} A${ri},${ri} 0 0,0 ${x0i},${y0i}`;
+  });
+  return (
+    <svg width="96" height="52" viewBox="0 0 96 52" style={{ imageRendering: "auto" }}>
+      <rect width="96" height="52" fill="rgba(0,0,0,0.55)" rx="4"/>
+      <circle cx={cx} cy={cy} r={r+3} fill="none" stroke="#1c1c1c" strokeWidth="0.5" strokeDasharray="2,3"/>
+      {paths.map((d, i) => (
+        <path key={i} d={d} fill={BLUE} opacity="0.14" stroke="#0c0c0c" strokeWidth="0.6"
+          style={{ animation: `radarSegPulse 2s ease-in-out ${i * 0.25}s infinite` }}/>
+      ))}
+      <g style={{ transformOrigin: `${cx}px ${cy}px`, animation: "radarSpin 3s linear infinite" }}>
+        <line x1={cx} y1={cy} x2={cx} y2={cy - r} stroke={BLUE} strokeWidth="1" strokeLinecap="round" opacity="0.6"/>
+        <circle cx={cx} cy={cy - r} r="1.5" fill={BLUE} opacity="0.9"/>
+      </g>
+      <circle cx={cx} cy={cy} r={ri} fill="#0a0a0a" stroke="#1a1a1a" strokeWidth="0.6"/>
+      <text x={cx} y={cy + 2} fill="#333" fontSize="5" fontFamily="monospace" textAnchor="middle" fontWeight="700">0/8</text>
+      <text x="2" y="50" fill={BLUE} fontSize="4.5" fontFamily="monospace" opacity="0.6">CONFLUENCE SCAN</text>
     </svg>
   );
 }
@@ -853,9 +1264,20 @@ function ScanningCard({
           <div style={{
             position: "absolute", bottom: 8, left: "50%", transform: "translateX(-50%)",
             animation: "pixelBob 2.4s ease-in-out infinite",
-            filter: `drop-shadow(0 4px 12px ${color}55)`,
+            filter: `drop-shadow(0 4px 14px ${color}66)`,
           }}>
-            <PixelCharacter label={label} s={4} />
+            <PixelCharacter label={label} s={3} />
+          </div>
+
+          {/* Strategy live mini-viz (floating screen in world) */}
+          <div style={{
+            position: "absolute", bottom: 10, right: 8,
+            borderRadius: 5, overflow: "hidden",
+            border: `1px solid ${color}33`,
+            boxShadow: `0 0 12px ${color}22`,
+            animation: "slideUpFade 0.5s ease-out 0.3s both",
+          }}>
+            <StratMiniViz label={label} color={color} />
           </div>
 
           {/* Top-left strat badge */}
@@ -1244,13 +1666,23 @@ function AbcCard({ label, color, signal, session, volRatio, regime, bias, isPrim
             <BiomeBackground label={label} />
           </div>
 
-          {/* Character — small, left side */}
+          {/* Character */}
           <div style={{
             position: "absolute", bottom: 4, left: "50%", transform: "translateX(-50%)",
-            filter: `drop-shadow(0 3px 10px ${color}66)`,
+            filter: `drop-shadow(0 3px 12px ${color}77)`,
             animation: "pixelBob 3s ease-in-out infinite",
           }}>
             <PixelCharacter label={label} s={3} />
+          </div>
+
+          {/* Mini strategy viz — signal active */}
+          <div style={{
+            position: "absolute", bottom: 6, right: 8,
+            borderRadius: 5, overflow: "hidden",
+            border: `1px solid ${color}44`,
+            boxShadow: `0 0 10px ${color}22`,
+          }}>
+            <StratMiniViz label={label} color={color} />
           </div>
 
           {/* Top-left: strat badge */}
@@ -1462,13 +1894,23 @@ function StratDPanel({ signal, ibEquity, onExecute, executing, execMsg, selAsset
               <BiomeCastle />
             </div>
 
-            {/* Commander character — bigger for strategy D */}
+            {/* Commander character */}
             <div style={{
               position: "absolute", bottom: 8, left: "50%", transform: "translateX(-50%)",
               animation: "pixelBob 2.8s ease-in-out infinite",
-              filter: `drop-shadow(0 4px 14px rgba(78,142,207,0.5))`,
+              filter: `drop-shadow(0 4px 16px rgba(78,142,207,0.55))`,
             }}>
-              <PixelCharacter label="D" s={5} />
+              <PixelCharacter label="D" s={3.5} />
+            </div>
+
+            {/* Radar mini-viz */}
+            <div style={{
+              position: "absolute", bottom: 10, right: 8,
+              borderRadius: 5, overflow: "hidden",
+              border: `1px solid ${BLUE}33`,
+              boxShadow: `0 0 12px ${BLUE}22`,
+            }}>
+              <StratMiniViz label="D" color={BLUE} />
             </div>
 
             {/* Strategy badge */}
@@ -1611,7 +2053,16 @@ function StratDPanel({ signal, ibEquity, onExecute, executing, execMsg, selAsset
           filter: `drop-shadow(0 3px 12px rgba(78,142,207,0.6))`,
           animation: "pixelBob 3s ease-in-out infinite",
         }}>
-          <PixelCharacter label="D" s={3.5} />
+          <PixelCharacter label="D" s={3} />
+        </div>
+        {/* Radar mini viz in signal mode too */}
+        <div style={{
+          position: "absolute", bottom: 6, right: 8,
+          borderRadius: 5, overflow: "hidden",
+          border: `1px solid ${BLUE}44`,
+          boxShadow: `0 0 10px ${BLUE}22`,
+        }}>
+          <StratMiniViz label="D" color={BLUE} />
         </div>
         {/* Header badges */}
         <div style={{
